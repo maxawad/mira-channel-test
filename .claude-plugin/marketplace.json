@@ -1,5 +1,5 @@
 {
-  "name": "alwayslistening-marketplace",
+  "name": "mira-marketplace",
   "owner": {
     "name": "Mira"
   },
@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "mira",
-      "source": "./plugins/alwayslistening",
+      "source": "./plugins/mira",
       "description": "Bridges chat from the Mira iOS app into Claude Code over a local tunnel"
     }
   ]

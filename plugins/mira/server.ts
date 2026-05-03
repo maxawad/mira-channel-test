@@ -7,7 +7,7 @@ import { createHash } from 'crypto'
 import { hostname } from 'os'
 import { appendFileSync } from 'fs'
 
-const PORT = Number(process.env.ALWAYSLISTENING_PORT ?? 3141)
+const PORT = Number(process.env.MIRA_PORT ?? 3141)
 const REQUEST_TIMEOUT_MS = 120_000
 
 const LOG_FILE = process.env.MIRA_LOG ?? '/tmp/mira.log'
@@ -104,7 +104,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           text:
             `Always Listening tunnel URL: ${url}\n\n` +
             `If messages from the iOS app aren't reaching Claude, restart Claude Code with:\n` +
-            `  claude --dangerously-load-development-channels plugin:mira@alwayslistening-marketplace\n` +
+            `  claude --dangerously-load-development-channels plugin:mira@mira-marketplace\n` +
             `That flag is required for Claude Code to surface inbound channel notifications from this plugin.`,
         },
       ],
