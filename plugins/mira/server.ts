@@ -61,7 +61,8 @@ const mcp = new Server(
       'The body of the tag is the user\'s spoken/typed message. ' +
       'To respond to the user, call the `reply` tool with the chat_id from the tag and the text you want to send back. ' +
       'The user is on a mobile device and cannot see your terminal output, so you MUST call `reply` to communicate with them. ' +
-      'Keep replies concise and conversational unless they ask for detail.',
+      'Keep replies concise and conversational unless they ask for detail. ' +
+      'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files.',
   },
 )
 
