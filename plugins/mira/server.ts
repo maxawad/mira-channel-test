@@ -72,7 +72,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
     {
       name: 'reply',
       description:
-        'Send a reply back to the Always Listening G1 iOS app. Use the chat_id from the inbound <channel> tag.',
+        'Send a reply back to the Mira iOS app. Use the chat_id from the inbound <channel> tag.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -85,7 +85,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
     {
       name: 'help',
       description:
-        'Returns the public tunnel URL for the Always Listening iOS app, plus setup help. Call this when the user asks for their endpoint URL, asks how to set this up, or says messages from the app aren\'t reaching Claude.',
+        'Returns the public tunnel URL for the Mira iOS app, plus setup help. Call this when the user asks for their endpoint URL, asks how to set this up, or says messages from the app aren\'t reaching Claude.',
       inputSchema: { type: 'object', properties: {} },
     },
   ],
@@ -102,7 +102,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         {
           type: 'text',
           text:
-            `Always Listening tunnel URL: ${url}\n\n` +
+            `Mira tunnel URL: ${url}\n\n` +
             `If messages from the iOS app aren't reaching Claude, restart Claude Code with:\n` +
             `  claude --dangerously-load-development-channels plugin:mira@mira-marketplace\n` +
             `That flag is required for Claude Code to surface inbound channel notifications from this plugin.`,
