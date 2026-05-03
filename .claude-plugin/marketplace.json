@@ -1,0 +1,16 @@
+{
+  "name": "alwayslistening-marketplace",
+  "owner": {
+    "name": "Mira"
+  },
+  "metadata": {
+    "description": "Bridges the Mira iOS app to a local Claude Code session"
+  },
+  "plugins": [
+    {
+      "name": "mira",
+      "source": "./plugins/alwayslistening",
+      "description": "Bridges chat from the Mira iOS app into Claude Code over a local tunnel"
+    }
+  ]
+}
