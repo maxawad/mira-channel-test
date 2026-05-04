@@ -49,6 +49,18 @@ type Pending = {
 const pending = new Map<string, Pending>()
 let nextId = 1
 
+type Connection = {
+  userId: string
+  accessToken: string
+  backendBaseUrl: string
+  connectedAt: number
+}
+let connection: Connection | null = null
+
+const NOT_CONNECTED_MESSAGE =
+  'Mira Cloud Plugin is not connected. Tell the user to open the Mira iOS app, ' +
+  'go to Settings → Claude Code, and tap Connect.'
+
 const mcp = new Server(
   { name: 'mira', version: '0.1.0' },
   {
@@ -62,7 +74,10 @@ const mcp = new Server(
       'To respond to the user, call the `reply` tool with the chat_id from the tag and the text you want to send back. ' +
       'The user is on a mobile device and cannot see your terminal output, so you MUST call `reply` to communicate with them. ' +
       'Keep replies concise and conversational unless they ask for detail. ' +
-      'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files.',
+      'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
+      'When the user asks about their past conversations, transcripts, or what they have discussed before, ' +
+      'use `list_conversations` and `get_conversation`. These read from the user\'s Mira backend; ' +
+      'they require the user to have pressed Connect in the iOS app first.',
   },
 )
 
@@ -89,6 +104,49 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
         'Returns the public tunnel URL for the Mira iOS app, plus setup help. Call this when the user asks for their endpoint URL, asks how to set this up, or says messages from the app aren\'t reaching Claude.',
       inputSchema: { type: 'object', properties: {} },
     },
+    {
+      name: 'list_conversations',
+      description:
+        'List the user\'s past Mira conversations (sessions) ordered most-recent-first. ' +
+        'Returns id, title, summary, and time range for each session. ' +
+        'Requires the user to have pressed Connect in the Mira iOS app first.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Max number of sessions to return (default 25)' },
+          offset: { type: 'number', description: 'Number of sessions to skip from the start (default 0)' },
+        },
+      },
+    },
+    {
+      name: 'get_conversation',
+      description:
+        'Fetch the full transcript of one Mira conversation (session) by id. ' +
+        'Returns every message with speaker label and timestamp. ' +
+        'Use the id values returned by `list_conversations` or `search_conversations`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'The session id (UUID) to fetch' },
+        },
+        required: ['session_id'],
+      },
+    },
+    {
+      name: 'search_conversations',
+      description:
+        'Search the user\'s past conversations by case-insensitive substring match against the title and summary. ' +
+        'NOTE: this is a lightweight title/summary filter, not full transcript search. ' +
+        'For broad scans across all sessions, fall back to `list_conversations` and inspect titles yourself.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Substring to match against session titles/summaries' },
+          limit: { type: 'number', description: 'Max number of matching sessions to return (default 25)' },
+        },
+        required: ['query'],
+      },
+    },
   ],
   }
 })
@@ -110,6 +168,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         },
       ],
     }
+  }
+
+  if (req.params.name === 'list_conversations') {
+    return await handleListConversations(req.params.arguments as { limit?: number; offset?: number })
+  }
+
+  if (req.params.name === 'get_conversation') {
+    return await handleGetConversation(req.params.arguments as { session_id: string })
+  }
+
+  if (req.params.name === 'search_conversations') {
+    return await handleSearchConversations(
+      req.params.arguments as { query: string; limit?: number },
+    )
   }
 
   if (req.params.name !== 'reply') {
@@ -134,6 +206,226 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   return { content: [{ type: 'text', text: 'sent' }] }
 })
 
+// MARK: - Backend transcript helpers
+
+type BackendSession = {
+  id: string
+  title?: string | null
+  summary?: string | null
+  summary_generated?: boolean
+  start_time?: string | null
+  end_time?: string | null
+  share_token?: string | null
+}
+
+type BackendMessage = {
+  id: string
+  text: string
+  speaker: number
+  timestamp: string
+  is_final: boolean
+}
+
+type BackendSessionDetail = BackendSession & {
+  messages?: BackendMessage[]
+  message_count?: number
+}
+
+function notConnectedResult() {
+  return {
+    content: [{ type: 'text', text: NOT_CONNECTED_MESSAGE }],
+    isError: true,
+  }
+}
+
+async function backendGet(path: string): Promise<Response> {
+  if (!connection) throw new Error('not connected')
+  const url = `${connection.backendBaseUrl}${path}`
+  return fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${connection.accessToken}`,
+      Accept: 'application/json',
+    },
+  })
+}
+
+function formatSessionLine(s: BackendSession): string {
+  const title = s.title?.trim() || '(untitled)'
+  const start = s.start_time ?? '(no start time)'
+  const summary = s.summary?.trim()
+  const summaryPart = summary ? ` — ${summary.replace(/\s+/g, ' ').slice(0, 160)}` : ''
+  return `- ${s.id}  ${start}  "${title}"${summaryPart}`
+}
+
+async function handleListConversations(args: {
+  limit?: number
+  offset?: number
+}): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  if (!connection) return notConnectedResult()
+  const limit = Math.max(1, Math.min(args?.limit ?? 25, 200))
+  const offset = Math.max(0, args?.offset ?? 0)
+  try {
+    const res = await backendGet('/messages/list')
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      log(`list_conversations backend error status=${res.status} body=${body.slice(0, 200)}`)
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Backend returned HTTP ${res.status} for /messages/list. ${body.slice(0, 300)}`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    const data = (await res.json()) as { sessions: BackendSession[] }
+    const all = data.sessions ?? []
+    const slice = all.slice(offset, offset + limit)
+    if (slice.length === 0) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `No conversations found (total=${all.length}, offset=${offset}).`,
+          },
+        ],
+      }
+    }
+    const header = `Showing ${slice.length} of ${all.length} conversations (offset=${offset}, limit=${limit}):`
+    const lines = slice.map(formatSessionLine).join('\n')
+    return { content: [{ type: 'text', text: `${header}\n${lines}` }] }
+  } catch (err) {
+    log(`list_conversations error: ${(err as Error).message}`)
+    return {
+      content: [{ type: 'text', text: `Failed to list conversations: ${(err as Error).message}` }],
+      isError: true,
+    }
+  }
+}
+
+async function handleGetConversation(args: {
+  session_id: string
+}): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  if (!connection) return notConnectedResult()
+  const sessionId = (args?.session_id ?? '').trim()
+  if (!sessionId) {
+    return {
+      content: [{ type: 'text', text: 'session_id is required.' }],
+      isError: true,
+    }
+  }
+  try {
+    const res = await backendGet(
+      `/messages/sessions/${encodeURIComponent(sessionId)}?include_messages=true`,
+    )
+    if (res.status === 404) {
+      return {
+        content: [{ type: 'text', text: `No conversation with id=${sessionId} (not found).` }],
+        isError: true,
+      }
+    }
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      log(`get_conversation backend error status=${res.status} body=${body.slice(0, 200)}`)
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Backend returned HTTP ${res.status} for /messages/sessions/${sessionId}. ${body.slice(0, 300)}`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    const detail = (await res.json()) as BackendSessionDetail
+    const title = detail.title?.trim() || '(untitled)'
+    const start = detail.start_time ?? '(no start time)'
+    const end = detail.end_time ?? '(ongoing)'
+    const summary = detail.summary?.trim()
+    const messages = detail.messages ?? []
+    const transcript = messages
+      .map((m) => `[${m.timestamp}] speaker ${m.speaker}: ${m.text}`)
+      .join('\n')
+    const parts = [
+      `Conversation ${detail.id}`,
+      `Title: ${title}`,
+      `Time: ${start} → ${end}`,
+      summary ? `Summary: ${summary}` : null,
+      `Messages (${messages.length}):`,
+      transcript || '(no messages)',
+    ].filter(Boolean)
+    return { content: [{ type: 'text', text: parts.join('\n') }] }
+  } catch (err) {
+    log(`get_conversation error: ${(err as Error).message}`)
+    return {
+      content: [{ type: 'text', text: `Failed to get conversation: ${(err as Error).message}` }],
+      isError: true,
+    }
+  }
+}
+
+async function handleSearchConversations(args: {
+  query: string
+  limit?: number
+}): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  if (!connection) return notConnectedResult()
+  const query = (args?.query ?? '').trim().toLowerCase()
+  if (!query) {
+    return {
+      content: [{ type: 'text', text: 'query is required.' }],
+      isError: true,
+    }
+  }
+  const limit = Math.max(1, Math.min(args?.limit ?? 25, 200))
+  try {
+    const res = await backendGet('/messages/list')
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      log(`search_conversations backend error status=${res.status} body=${body.slice(0, 200)}`)
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Backend returned HTTP ${res.status} for /messages/list. ${body.slice(0, 300)}`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    const data = (await res.json()) as { sessions: BackendSession[] }
+    const all = data.sessions ?? []
+    const matches = all.filter((s) => {
+      const t = (s.title ?? '').toLowerCase()
+      const sm = (s.summary ?? '').toLowerCase()
+      return t.includes(query) || sm.includes(query)
+    })
+    const slice = matches.slice(0, limit)
+    if (slice.length === 0) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `No conversations match "${args.query}" (searched ${all.length} sessions by title/summary).`,
+          },
+        ],
+      }
+    }
+    const header = `Found ${matches.length} match${matches.length === 1 ? '' : 'es'} for "${args.query}" (showing ${slice.length}):`
+    const lines = slice.map(formatSessionLine).join('\n')
+    return { content: [{ type: 'text', text: `${header}\n${lines}` }] }
+  } catch (err) {
+    log(`search_conversations error: ${(err as Error).message}`)
+    return {
+      content: [
+        { type: 'text', text: `Failed to search conversations: ${(err as Error).message}` },
+      ],
+      isError: true,
+    }
+  }
+}
+
 await mcp.connect(new StdioServerTransport())
 log('mcp stdio connected')
 
@@ -148,6 +440,67 @@ Bun.serve({
 
     if (req.method === 'GET' && url.pathname === '/health') {
       return Response.json({ status: 'ok', pending: pending.size })
+    }
+
+    if (req.method === 'POST' && url.pathname === '/connect') {
+      let body: any
+      try {
+        body = await req.json()
+      } catch {
+        log('http /connect invalid json')
+        return Response.json({ error: 'invalid json' }, { status: 400 })
+      }
+      const userId = (body?.user_id ?? '').toString().trim()
+      const accessToken = (body?.access_token ?? '').toString().trim()
+      const rawBackend = (body?.backend_base_url ?? '').toString().trim()
+      if (!userId || !accessToken || !rawBackend) {
+        log('http /connect missing fields')
+        return Response.json(
+          { error: 'user_id, access_token, and backend_base_url are required' },
+          { status: 400 },
+        )
+      }
+      let backendBaseUrl = rawBackend.replace(/\/+$/, '')
+      try {
+        const parsed = new URL(backendBaseUrl)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new Error('protocol must be http(s)')
+        }
+      } catch (err) {
+        log(`http /connect bad backend_base_url=${rawBackend} err=${(err as Error).message}`)
+        return Response.json({ error: 'backend_base_url is not a valid URL' }, { status: 400 })
+      }
+      connection = {
+        userId,
+        accessToken,
+        backendBaseUrl,
+        connectedAt: Date.now(),
+      }
+      log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
+      return Response.json({
+        status: 'connected',
+        user_id: userId,
+        plugin_version: '0.1.0',
+      })
+    }
+
+    if (req.method === 'GET' && url.pathname === '/connect/status') {
+      if (!connection) {
+        return Response.json({ connected: false })
+      }
+      return Response.json({
+        connected: true,
+        user_id: connection.userId,
+        connected_at: connection.connectedAt,
+      })
+    }
+
+    if (req.method === 'POST' && url.pathname === '/disconnect') {
+      const wasConnected = connection !== null
+      const userId = connection?.userId
+      connection = null
+      log(`disconnect was_connected=${wasConnected} user_id=${userId ?? '(none)'}`)
+      return Response.json({ status: 'disconnected' })
     }
 
     if (req.method === 'POST' && url.pathname === '/api/chat') {
