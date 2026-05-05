@@ -564,7 +564,26 @@ Bun.serve({
       try {
         const reply = await responsePromise
         log(`chat OUT chat_id=${chatId} text_len=${reply.text.length}`)
-        return Response.json({ text: reply.text, sources: [], debug: null })
+        const stream = new ReadableStream({
+          start(controller) {
+            // Emit tool status event
+            controller.enqueue(
+              new TextEncoder().encode(
+                `data: ${JSON.stringify({ type: 'tool_status', status: 'complete' })}\n\n`
+              )
+            )
+            // Emit reply data
+            controller.enqueue(
+              new TextEncoder().encode(
+                `data: ${JSON.stringify({ text: reply.text, sources: [], debug: null })}\n\n`
+              )
+            )
+            controller.close()
+          },
+        })
+        return new Response(stream, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
       } catch (err) {
         log(`chat ERR chat_id=${chatId} err=${(err as Error).message}`)
         return Response.json(
