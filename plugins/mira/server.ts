@@ -2,10 +2,9 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import localtunnel from 'localtunnel'
-import { createHash } from 'crypto'
-import { hostname } from 'os'
+import { z } from 'zod'
 import { appendFileSync } from 'fs'
+import { openTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 
 const PORT = Number(process.env.MIRA_PORT ?? 3141)
 const REQUEST_TIMEOUT_MS = 120_000
@@ -34,21 +33,46 @@ function safeStringify(value: unknown): string {
 
 log(`boot pid=${process.pid} port=${PORT} log=${LOG_FILE}`)
 
-// Derive a stable subdomain from the machine hostname so the URL is consistent
-// across restarts (best-effort — localtunnel falls back to random if taken).
-const SUBDOMAIN = 'al-' + createHash('md5').update(hostname()).digest('hex').slice(0, 8)
-
-let tunnelUrl: string | null = null
-let tunnelError: string | null = null
-
 type Pending = {
-  resolve: (value: { text: string }) => void
-  reject: (err: Error) => void
+  controller: ReadableStreamDefaultController<Uint8Array>
   timer: ReturnType<typeof setTimeout>
+  keepalive: ReturnType<typeof setInterval>
 }
 
 const pending = new Map<string, Pending>()
+const pendingPermissions = new Set<string>()
+const encoder = new TextEncoder()
 let nextId = 1
+let lastActiveChatId: string | null = null
+
+async function denyAllPendingPermissions() {
+  if (pendingPermissions.size === 0) return
+  log(`denying ${pendingPermissions.size} stale permissions`)
+  for (const id of pendingPermissions) {
+    await mcp.notification({
+      method: 'notifications/claude/channel/permission',
+      params: { request_id: id, behavior: 'deny' },
+    })
+  }
+  pendingPermissions.clear()
+}
+
+function sseSend(controller: ReadableStreamDefaultController<Uint8Array>, payload: unknown) {
+  controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+}
+
+function resetTimeout(chatId: string) {
+  const p = pending.get(chatId)
+  if (!p) return
+  clearTimeout(p.timer)
+  p.timer = setTimeout(() => {
+    log(`chat TIMEOUT chat_id=${chatId} after ${REQUEST_TIMEOUT_MS}ms`)
+    sseSend(p.controller, { error: 'timeout' })
+    p.controller.close()
+    clearInterval(p.keepalive)
+    pending.delete(chatId)
+  }, REQUEST_TIMEOUT_MS)
+}
 
 type Connection = {
   userId: string
@@ -66,15 +90,18 @@ const mcp = new Server(
   { name: 'mira', version: '0.1.0' },
   {
     capabilities: {
-      experimental: { 'claude/channel': {} },
+      experimental: { 'claude/channel': {}, 'claude/channel/permission': {} },
       tools: {},
     },
     instructions:
       'Messages from the Mira iOS app arrive as <channel source="mira" chat_id="..."> tags. ' +
       'The body of the tag is the user\'s spoken/typed message. ' +
-      'You must respond to the user. The user has no way of knowing you have done somehting unless you reply. ' + 
-      'Call the `reply` tool with the chat_id from the tag and the text you want to send back. ' +
-      'The user is on a glasses and cannot see your terminal output, so you MUST call `reply` to communicate with them. ' +
+      'You MUST ALWAYS call the `reply` tool exactly once before finishing your turn. This is non-negotiable. ' +
+      'This applies to EVERY response: final answers, clarifying questions, error explanations, "I need more info" messages, partial results, ANY response at all. ' +
+      'If a tool fails or you need clarification, call `reply` with that question or explanation—do NOT just respond in the terminal. ' +
+      'Do NOT call reply multiple times for intermediate steps; accumulate everything and send ONE reply at the end. ' +
+      'Before calling `reply`, verify the task has actually been completed. Do NOT say "done" until you have confirmed the result. ' +
+      'The user is on glasses and cannot see your terminal output, so calling `reply` is the ONLY way to communicate with them. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
       'When the user asks about their past conversations, transcripts, or what they have discussed before, ' +
       'use `list_conversations` and `get_conversation`. These read from the user\'s Mira backend; ' +
@@ -156,6 +183,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   log(`mcp call_tool name=${req.params.name}`, req.params.arguments)
 
   if (req.params.name === 'help') {
+    const tunnelUrl = getTunnelUrl()
+    const tunnelError = getTunnelError()
     let statusLine: string
     if (tunnelUrl) {
       statusLine = `Mira tunnel URL: ${tunnelUrl}`
@@ -208,10 +237,67 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
   }
   clearTimeout(p.timer)
+  clearInterval(p.keepalive)
   pending.delete(chat_id)
   log(`reply OK chat_id=${chat_id} text_len=${text?.length ?? 0}`)
-  p.resolve({ text })
+  // Dismiss any still-pending permissions—they were resolved elsewhere (e.g., terminal)
+  if (pendingPermissions.size > 0) {
+    sseSend(p.controller, { permission_dismiss: { request_ids: [...pendingPermissions] } })
+    pendingPermissions.clear()
+  }
+  sseSend(p.controller, { text })
+  sseSend(p.controller, { sources: [] })
+  p.controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+  p.controller.close()
   return { content: [{ type: 'text', text: 'sent' }] }
+})
+
+// Permission relay: Claude Code asks user for approval
+const PermissionRequestSchema = z.object({
+  method: z.literal('notifications/claude/channel/permission_request'),
+  params: z.object({
+    request_id: z.string(),
+    tool_name: z.string(),
+    description: z.string(),
+    input_preview: z.string(),
+  }),
+})
+
+mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
+  const { request_id, tool_name, input_preview } = params
+  log(`permission_request request_id=${request_id} tool=${tool_name}`)
+  if (!lastActiveChatId) {
+    pendingPermissions.add(request_id)
+    return
+  }
+  const p = pending.get(lastActiveChatId)
+  if (!p) {
+    log(`permission_request DROPPED no-stream chat_id=${lastActiveChatId}`)
+    pendingPermissions.add(request_id)
+    return
+  }
+  resetTimeout(lastActiveChatId)
+  if (pendingPermissions.size > 0) {
+    sseSend(p.controller, { permission_dismiss: { request_ids: [...pendingPermissions] } })
+    pendingPermissions.clear()
+  }
+  pendingPermissions.add(request_id)
+
+  const truncate = (s: string) => s.length > 500 ? s.slice(0, 500) + '…' : s
+  let details: { value: string }[]
+  try {
+    const parsed = JSON.parse(input_preview) as Record<string, unknown>
+    details = Object.values(parsed).map(value => ({
+      value: truncate(typeof value === 'string' ? value : JSON.stringify(value)),
+    }))
+  } catch {
+    details = [{ value: truncate(input_preview) }]
+  }
+
+  sseSend(p.controller, {
+    permission_request: { request_id, tool_name, details },
+  })
+  log(`permission_request SENT chat_id=${lastActiveChatId} request_id=${request_id} details_count=${details.length}`)
 })
 
 // MARK: - Backend transcript helpers
@@ -511,7 +597,34 @@ Bun.serve({
       return Response.json({ status: 'disconnected' })
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/permission') {
+      const body = await req.json() as { request_id?: string; response?: string }
+      const { request_id, response } = body
+      if (!request_id || !response) {
+        return Response.json({ error: 'missing request_id or response' }, { status: 400 })
+      }
+      log(`permission_response request_id=${request_id} response=${response}`)
+      pendingPermissions.delete(request_id)
+      if (lastActiveChatId) resetTimeout(lastActiveChatId)
+      const behavior =
+        response === 'allow' ? 'allow' :
+        response === 'allow_permanent' ? 'allow_always' :
+        'deny'
+      await mcp.notification({
+        method: 'notifications/claude/channel/permission',
+        params: { request_id, behavior },
+      })
+      return Response.json({ status: 'recorded' })
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/cancel-permissions') {
+      await denyAllPendingPermissions()
+      return Response.json({ status: 'cancelled' })
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/chat') {
+      // Clear any stale permissions before processing a new chat
+      await denyAllPendingPermissions()
       let body: any
       try {
         body = await req.json()
@@ -535,43 +648,43 @@ Bun.serve({
       if (typeof body?.user_timezone === 'string') meta.user_timezone = body.user_timezone
 
       log(`chat IN chat_id=${chatId} text=${JSON.stringify(userText.slice(0, 200))}`)
+      lastActiveChatId = chatId
 
-      const responsePromise = new Promise<{ text: string }>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          pending.delete(chatId)
-          log(`chat TIMEOUT chat_id=${chatId} after ${REQUEST_TIMEOUT_MS}ms`)
-          reject(new Error('timeout'))
-        }, REQUEST_TIMEOUT_MS)
-        pending.set(chatId, { resolve, reject, timer })
+      const stream = new ReadableStream({
+        start(controller) {
+          const timer = setTimeout(() => {
+            log(`chat TIMEOUT chat_id=${chatId} after ${REQUEST_TIMEOUT_MS}ms`)
+            sseSend(controller, { error: 'timeout' })
+            controller.close()
+            const p = pending.get(chatId)
+            if (p) clearInterval(p.keepalive)
+            pending.delete(chatId)
+          }, REQUEST_TIMEOUT_MS)
+          const keepalive = setInterval(() => {
+            controller.enqueue(encoder.encode(': keepalive\n\n'))
+          }, 20_000)
+          pending.set(chatId, { controller, timer, keepalive })
+        },
+        cancel() {
+          const p = pending.get(chatId)
+          if (p) {
+            clearTimeout(p.timer)
+            clearInterval(p.keepalive)
+            pending.delete(chatId)
+          }
+        },
       })
 
-      try {
-        log(`mcp notify → notifications/claude/channel chat_id=${chatId}`)
-        await mcp.notification({
-          method: 'notifications/claude/channel',
-          params: { content: userText, meta },
-        })
-        log(`mcp notify ✓ chat_id=${chatId}`)
-      } catch (err) {
-        pending.delete(chatId)
-        log(`mcp notify FAILED chat_id=${chatId} err=${(err as Error).message}`)
-        return Response.json(
-          { error: { message: `failed to push to claude code: ${(err as Error).message}` } },
-          { status: 500 },
-        )
-      }
+      log(`mcp notify → notifications/claude/channel chat_id=${chatId}`)
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: { content: userText, meta },
+      })
+      log(`mcp notify ✓ chat_id=${chatId}`)
 
-      try {
-        const reply = await responsePromise
-        log(`chat OUT chat_id=${chatId} text_len=${reply.text.length}`)
-        return Response.json({ text: reply.text, sources: [], debug: null })
-      } catch (err) {
-        log(`chat ERR chat_id=${chatId} err=${(err as Error).message}`)
-        return Response.json(
-          { error: { message: (err as Error).message } },
-          { status: 504 },
-        )
-      }
+      return new Response(stream, {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
     }
 
     return new Response('not found', { status: 404 })
@@ -580,42 +693,4 @@ Bun.serve({
 
 log(`http listener up on http://127.0.0.1:${PORT}`)
 
-async function openTunnel() {
-  try {
-    log(`tunnel opening subdomain=${SUBDOMAIN}`)
-    const tunnel = await localtunnel({ port: PORT, subdomain: SUBDOMAIN })
-    const got = new URL(tunnel.url).hostname.split('.')[0]
-
-    if (got !== SUBDOMAIN) {
-      tunnel.close()
-      tunnelUrl = null
-      tunnelError =
-        `Your tunnel address (${SUBDOMAIN}.loca.lt) is occupied. ` +
-        `Restart the plugin to try again.`
-      log(`tunnel subdomain mismatch: requested=${SUBDOMAIN} got=${got}`)
-      return
-    }
-
-    tunnelUrl = tunnel.url
-    tunnelError = null
-    log(`tunnel up url=${tunnelUrl}`)
-
-    tunnel.on('error', (err) => {
-      tunnelUrl = null
-      tunnelError = `Tunnel disconnected: ${err.message}. Restart the plugin to reconnect.`
-      log(`tunnel error: ${err.message}`)
-    })
-
-    tunnel.on('close', () => {
-      tunnelUrl = null
-      tunnelError = 'Tunnel closed unexpectedly. Restart the plugin to reconnect.'
-      log('tunnel closed')
-    })
-  } catch (err) {
-    tunnelUrl = null
-    tunnelError = `Failed to open tunnel: ${(err as Error).message}. Restart the plugin to try again.`
-    log(`tunnel open FAILED: ${(err as Error).message}`)
-  }
-}
-
-openTunnel()
+openTunnel(PORT, log)
