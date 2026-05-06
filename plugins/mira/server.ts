@@ -3,8 +3,10 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { appendFileSync } from 'fs'
+import { appendFileSync, mkdirSync, writeFileSync, existsSync } from 'fs'
 import { openTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
+import { join } from 'path'
+import { homedir } from 'os'
 
 const PORT = Number(process.env.MIRA_PORT ?? 3141)
 const REQUEST_TIMEOUT_MS = 120_000
@@ -29,6 +31,61 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value)
   }
+}
+
+function sessionMarkdownPath(userDir: string, session: BackendSession): string {
+  const title =
+    (session.title?.trim() || 'untitled')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80) || 'untitled'
+  const date = (session.start_time ?? 'unknown-date').slice(0, 10)
+  return join(userDir, `${session.id}-${title}-${date}.md`)
+}
+
+async function syncConversationsToMarkdown() {
+  if (!connection) return
+  const listRes = await backendGet('/messages/list')
+  if (!listRes.ok) {
+    const body = await listRes.text().catch(() => '')
+    log(`conversation sync backend error status=${listRes.status} body=${body.slice(0, 200)}`)
+    return
+  }
+  const data = (await listRes.json()) as { sessions: BackendSession[] }
+  const sessions = data.sessions ?? []
+  const userDir = join(homedir(), '.mira', connection.userId)
+  mkdirSync(userDir, { recursive: true })
+  for (const session of sessions) {
+    const path = sessionMarkdownPath(userDir, session)
+    if (existsSync(path)) {
+      continue
+    }
+    const detailRes = await backendGet(
+      `/messages/sessions/${encodeURIComponent(session.id)}?include_messages=true`,
+    )
+    if (!detailRes.ok) {
+      const body = await detailRes.text().catch(() => '')
+      log(`session sync failed id=${session.id} status=${detailRes.status} body=${body.slice(0, 200)}`)
+      continue
+    }
+    const detail = (await detailRes.json()) as BackendSessionDetail
+    const messages = detail.messages ?? []
+    const markdown = [
+      `# ${detail.title?.trim() || '(untitled)'}`,
+      '',
+      `Session ID: ${detail.id}`,
+      `Time: ${detail.start_time ?? '(no start time)'} -> ${detail.end_time ?? '(no end time)'}`,
+      detail.summary?.trim() ? `Summary: ${detail.summary.trim()}` : null,
+      '',
+      '## Transcript',
+      '',
+      ...messages.map((m) => `[${m.timestamp}] speaker ${m.speaker}: ${m.text}`),
+      '',
+    ].filter(Boolean).join('\n')
+    writeFileSync(path, markdown, 'utf8')
+  }
+  log(`conversation sync OK user_id=${connection.userId} sessions=${sessions.length}`)
 }
 
 log(`boot pid=${process.pid} port=${PORT} log=${LOG_FILE}`)
@@ -82,10 +139,6 @@ type Connection = {
 }
 let connection: Connection | null = null
 
-const NOT_CONNECTED_MESSAGE =
-  'Mira Cloud Plugin is not connected. Tell the user to open the Mira iOS app, ' +
-  'go to Settings → Claude Code, and tap Connect.'
-
 const mcp = new Server(
   { name: 'mira', version: '0.1.0' },
   {
@@ -103,9 +156,7 @@ const mcp = new Server(
       'Before calling `reply`, verify the task has actually been completed. Do NOT say "done" until you have confirmed the result. ' +
       'The user is on glasses and cannot see your terminal output, so calling `reply` is the ONLY way to communicate with them. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
-      'When the user asks about their past conversations, transcripts, or what they have discussed before, ' +
-      'use `list_conversations` and `get_conversation`. These read from the user\'s Mira backend; ' +
-      'they require the user to have pressed Connect in the iOS app first.',
+      'When asked about past Mira conversations, search the local transcript cache at ~/.mira/*/*.md with filesystem search first, then read only the relevant matching session files.',
   },
 )
 
@@ -131,49 +182,6 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
       description:
         'Returns the public tunnel URL for the Mira iOS app, plus setup help. Call this when the user asks for their endpoint URL, asks how to set this up, or says messages from the app aren\'t reaching Claude.',
       inputSchema: { type: 'object', properties: {} },
-    },
-    {
-      name: 'list_conversations',
-      description:
-        'List the user\'s past Mira conversations (sessions) ordered most-recent-first. ' +
-        'Returns id, title, summary, and time range for each session. ' +
-        'Requires the user to have pressed Connect in the Mira iOS app first.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          limit: { type: 'number', description: 'Max number of sessions to return (default 25)' },
-          offset: { type: 'number', description: 'Number of sessions to skip from the start (default 0)' },
-        },
-      },
-    },
-    {
-      name: 'get_conversation',
-      description:
-        'Fetch the full transcript of one Mira conversation (session) by id. ' +
-        'Returns every message with speaker label and timestamp. ' +
-        'Use the id values returned by `list_conversations` or `search_conversations`.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          session_id: { type: 'string', description: 'The session id (UUID) to fetch' },
-        },
-        required: ['session_id'],
-      },
-    },
-    {
-      name: 'search_conversations',
-      description:
-        'Search the user\'s past conversations by case-insensitive substring match against the title and summary. ' +
-        'NOTE: this is a lightweight title/summary filter, not full transcript search. ' +
-        'For broad scans across all sessions, fall back to `list_conversations` and inspect titles yourself.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Substring to match against session titles/summaries' },
-          limit: { type: 'number', description: 'Max number of matching sessions to return (default 25)' },
-        },
-        required: ['query'],
-      },
     },
   ],
   }
@@ -205,20 +213,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         },
       ],
     }
-  }
-
-  if (req.params.name === 'list_conversations') {
-    return await handleListConversations(req.params.arguments as { limit?: number; offset?: number })
-  }
-
-  if (req.params.name === 'get_conversation') {
-    return await handleGetConversation(req.params.arguments as { session_id: string })
-  }
-
-  if (req.params.name === 'search_conversations') {
-    return await handleSearchConversations(
-      req.params.arguments as { query: string; limit?: number },
-    )
   }
 
   if (req.params.name !== 'reply') {
@@ -325,13 +319,6 @@ type BackendSessionDetail = BackendSession & {
   message_count?: number
 }
 
-function notConnectedResult() {
-  return {
-    content: [{ type: 'text', text: NOT_CONNECTED_MESSAGE }],
-    isError: true,
-  }
-}
-
 async function backendGet(path: string): Promise<Response> {
   if (!connection) throw new Error('not connected')
   const url = `${connection.backendBaseUrl}${path}`
@@ -342,182 +329,6 @@ async function backendGet(path: string): Promise<Response> {
       Accept: 'application/json',
     },
   })
-}
-
-function formatSessionLine(s: BackendSession): string {
-  const title = s.title?.trim() || '(untitled)'
-  const start = s.start_time ?? '(no start time)'
-  const summary = s.summary?.trim()
-  const summaryPart = summary ? ` — ${summary.replace(/\s+/g, ' ').slice(0, 160)}` : ''
-  return `- ${s.id}  ${start}  "${title}"${summaryPart}`
-}
-
-async function handleListConversations(args: {
-  limit?: number
-  offset?: number
-}): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
-  if (!connection) return notConnectedResult()
-  const limit = Math.max(1, Math.min(args?.limit ?? 25, 200))
-  const offset = Math.max(0, args?.offset ?? 0)
-  try {
-    const res = await backendGet('/messages/list')
-    if (!res.ok) {
-      const body = await res.text().catch(() => '')
-      log(`list_conversations backend error status=${res.status} body=${body.slice(0, 200)}`)
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Backend returned HTTP ${res.status} for /messages/list. ${body.slice(0, 300)}`,
-          },
-        ],
-        isError: true,
-      }
-    }
-    const data = (await res.json()) as { sessions: BackendSession[] }
-    const all = data.sessions ?? []
-    const slice = all.slice(offset, offset + limit)
-    if (slice.length === 0) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `No conversations found (total=${all.length}, offset=${offset}).`,
-          },
-        ],
-      }
-    }
-    const header = `Showing ${slice.length} of ${all.length} conversations (offset=${offset}, limit=${limit}):`
-    const lines = slice.map(formatSessionLine).join('\n')
-    return { content: [{ type: 'text', text: `${header}\n${lines}` }] }
-  } catch (err) {
-    log(`list_conversations error: ${(err as Error).message}`)
-    return {
-      content: [{ type: 'text', text: `Failed to list conversations: ${(err as Error).message}` }],
-      isError: true,
-    }
-  }
-}
-
-async function handleGetConversation(args: {
-  session_id: string
-}): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
-  if (!connection) return notConnectedResult()
-  const sessionId = (args?.session_id ?? '').trim()
-  if (!sessionId) {
-    return {
-      content: [{ type: 'text', text: 'session_id is required.' }],
-      isError: true,
-    }
-  }
-  try {
-    const res = await backendGet(
-      `/messages/sessions/${encodeURIComponent(sessionId)}?include_messages=true`,
-    )
-    if (res.status === 404) {
-      return {
-        content: [{ type: 'text', text: `No conversation with id=${sessionId} (not found).` }],
-        isError: true,
-      }
-    }
-    if (!res.ok) {
-      const body = await res.text().catch(() => '')
-      log(`get_conversation backend error status=${res.status} body=${body.slice(0, 200)}`)
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Backend returned HTTP ${res.status} for /messages/sessions/${sessionId}. ${body.slice(0, 300)}`,
-          },
-        ],
-        isError: true,
-      }
-    }
-    const detail = (await res.json()) as BackendSessionDetail
-    const title = detail.title?.trim() || '(untitled)'
-    const start = detail.start_time ?? '(no start time)'
-    const end = detail.end_time ?? '(ongoing)'
-    const summary = detail.summary?.trim()
-    const messages = detail.messages ?? []
-    const transcript = messages
-      .map((m) => `[${m.timestamp}] speaker ${m.speaker}: ${m.text}`)
-      .join('\n')
-    const parts = [
-      `Conversation ${detail.id}`,
-      `Title: ${title}`,
-      `Time: ${start} → ${end}`,
-      summary ? `Summary: ${summary}` : null,
-      `Messages (${messages.length}):`,
-      transcript || '(no messages)',
-    ].filter(Boolean)
-    return { content: [{ type: 'text', text: parts.join('\n') }] }
-  } catch (err) {
-    log(`get_conversation error: ${(err as Error).message}`)
-    return {
-      content: [{ type: 'text', text: `Failed to get conversation: ${(err as Error).message}` }],
-      isError: true,
-    }
-  }
-}
-
-async function handleSearchConversations(args: {
-  query: string
-  limit?: number
-}): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
-  if (!connection) return notConnectedResult()
-  const query = (args?.query ?? '').trim().toLowerCase()
-  if (!query) {
-    return {
-      content: [{ type: 'text', text: 'query is required.' }],
-      isError: true,
-    }
-  }
-  const limit = Math.max(1, Math.min(args?.limit ?? 25, 200))
-  try {
-    const res = await backendGet('/messages/list')
-    if (!res.ok) {
-      const body = await res.text().catch(() => '')
-      log(`search_conversations backend error status=${res.status} body=${body.slice(0, 200)}`)
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Backend returned HTTP ${res.status} for /messages/list. ${body.slice(0, 300)}`,
-          },
-        ],
-        isError: true,
-      }
-    }
-    const data = (await res.json()) as { sessions: BackendSession[] }
-    const all = data.sessions ?? []
-    const matches = all.filter((s) => {
-      const t = (s.title ?? '').toLowerCase()
-      const sm = (s.summary ?? '').toLowerCase()
-      return t.includes(query) || sm.includes(query)
-    })
-    const slice = matches.slice(0, limit)
-    if (slice.length === 0) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `No conversations match "${args.query}" (searched ${all.length} sessions by title/summary).`,
-          },
-        ],
-      }
-    }
-    const header = `Found ${matches.length} match${matches.length === 1 ? '' : 'es'} for "${args.query}" (showing ${slice.length}):`
-    const lines = slice.map(formatSessionLine).join('\n')
-    return { content: [{ type: 'text', text: `${header}\n${lines}` }] }
-  } catch (err) {
-    log(`search_conversations error: ${(err as Error).message}`)
-    return {
-      content: [
-        { type: 'text', text: `Failed to search conversations: ${(err as Error).message}` },
-      ],
-      isError: true,
-    }
-  }
 }
 
 await mcp.connect(new StdioServerTransport())
@@ -570,6 +381,11 @@ Bun.serve({
         backendBaseUrl,
         connectedAt: Date.now(),
       }
+
+      void syncConversationsToMarkdown().catch((err) => {
+        log(`conversation sync failed: ${(err as Error).message}`)
+      })
+
       log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
       return Response.json({
         status: 'connected',
