@@ -1,4 +1,26 @@
 {
-  "description": "Mira plugin hooks disabled for now",
-  "hooks": {}
+  "description": "Mira plugin hooks",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/session-start.ts"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >> /Users/caineardayfio/myoutput.txt"
+          }
+        ]
+      }
+    ]
+  }
 }

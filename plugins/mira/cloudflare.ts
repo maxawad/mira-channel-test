@@ -1,8 +1,12 @@
+import { mkdirSync, writeFileSync, unlinkSync } from 'fs'
+
 const CLOUDFLARED_DIR = `${process.env.HOME}/.mira-mcp`
 const CLOUDFLARED_PATH = `${CLOUDFLARED_DIR}/cloudflared`
 const TOKEN_PATH = `${CLOUDFLARED_DIR}/cloudflared.token`
 const CONFIGURED_URL_PATH = `${CLOUDFLARED_DIR}/cloudflared.url`
-const URL_PATH = `${CLOUDFLARED_DIR}/tunnel.url`
+// Persisted on disk so out-of-process consumers (e.g. SessionStart hooks)
+// can read the current tunnel URL without talking to the MCP server.
+export const TUNNEL_URL_FILE = `${CLOUDFLARED_DIR}/tunnel.url`
 
 let tunnelUrl: string | null = null
 let tunnelError: string | null = null
@@ -35,6 +39,26 @@ async function readConfiguredTunnelUrl(): Promise<string | null> {
   )
 }
 
+function clearTunnelUrlFile(log: (msg: string) => void) {
+  try {
+    unlinkSync(TUNNEL_URL_FILE)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code && code !== 'ENOENT') {
+      log(`tunnel.url unlink failed: ${(err as Error).message}`)
+    }
+  }
+}
+
+function writeTunnelUrlFile(url: string, log: (msg: string) => void) {
+  try {
+    mkdirSync(CLOUDFLARED_DIR, { recursive: true })
+    writeFileSync(TUNNEL_URL_FILE, url)
+  } catch (err) {
+    log(`tunnel.url write failed: ${(err as Error).message}`)
+  }
+}
+
 async function ensureCloudflared(log: (msg: string) => void): Promise<string> {
   if (await Bun.file(CLOUDFLARED_PATH).exists()) return CLOUDFLARED_PATH
   log('downloading cloudflared (first run)...')
@@ -53,13 +77,16 @@ async function ensureCloudflared(log: (msg: string) => void): Promise<string> {
 }
 
 export async function openTunnel(port: number, log: (msg: string) => void): Promise<void> {
+  // Wipe any stale URL from a prior run before we have a new one.
+  clearTunnelUrlFile(log)
+
   const binary = await ensureCloudflared(log)
   const token = await readTunnelToken()
   const configuredUrl = await readConfiguredTunnelUrl()
 
   if (configuredUrl) {
     tunnelUrl = configuredUrl
-    await Bun.write(URL_PATH, `${configuredUrl}\n`).catch(() => {})
+    writeTunnelUrlFile(configuredUrl, log)
   }
 
   const args = token
@@ -74,11 +101,12 @@ export async function openTunnel(port: number, log: (msg: string) => void): Prom
   const proc = Bun.spawn([binary, ...args], {
     stderr: 'pipe',
     stdout: 'pipe',
-    onExit(_, code) {
+    onExit: (_, code) => {
       log(`cloudflared exited code=${code}`)
       tunnelRunning = false
       tunnelUrl = null
       tunnelError = 'Tunnel closed. Restart the plugin to reconnect.'
+      clearTunnelUrlFile(log)
     },
   })
   tunnelRunning = true
@@ -94,7 +122,7 @@ export async function openTunnel(port: number, log: (msg: string) => void): Prom
       if (match && !tunnelUrl) {
         tunnelUrl = match[0]
         tunnelError = null
-        await Bun.write(URL_PATH, `${tunnelUrl}\n`).catch(() => {})
+        writeTunnelUrlFile(tunnelUrl, log)
         log(`tunnel up url=${tunnelUrl}`)
       }
       if (tunnelMode === 'named' && /Registered tunnel connection|Connection .* registered|Starting tunnel/i.test(buffer)) {

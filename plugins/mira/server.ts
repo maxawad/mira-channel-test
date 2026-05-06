@@ -3,10 +3,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { appendFileSync } from 'fs'
-import { openTunnel, getTunnelUrl, getTunnelError, getTunnelMode, isTunnelRunning } from './cloudflare'
 import { appendFileSync, mkdirSync, writeFileSync, existsSync } from 'fs'
-import { openTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
+import { openTunnel, getTunnelUrl, getTunnelError, getTunnelMode, isTunnelRunning } from './cloudflare'
 import { join } from 'path'
 import { homedir } from 'os'
 
@@ -98,11 +96,9 @@ type Pending = {
   keepalive: ReturnType<typeof setInterval>
 }
 
-const pending = new Map<string, Pending>()
+let active: Pending | null = null
 const pendingPermissions = new Set<string>()
 const encoder = new TextEncoder()
-let nextId = 1
-let lastActiveChatId: string | null = null
 
 async function denyAllPendingPermissions() {
   if (pendingPermissions.size === 0) return
@@ -120,16 +116,27 @@ function sseSend(controller: ReadableStreamDefaultController<Uint8Array>, payloa
   controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
 }
 
-function resetTimeout(chatId: string) {
-  const p = pending.get(chatId)
+function closeActive(reason: 'timeout' | 'superseded') {
+  const p = active
+  if (!p) return
+  active = null
+  clearTimeout(p.timer)
+  clearInterval(p.keepalive)
+  try {
+    sseSend(p.controller, { error: reason })
+    p.controller.close()
+  } catch {
+    // controller may already be closed
+  }
+}
+
+function resetTimeout() {
+  const p = active
   if (!p) return
   clearTimeout(p.timer)
   p.timer = setTimeout(() => {
-    log(`chat TIMEOUT chat_id=${chatId} after ${REQUEST_TIMEOUT_MS}ms`)
-    sseSend(p.controller, { error: 'timeout' })
-    p.controller.close()
-    clearInterval(p.keepalive)
-    pending.delete(chatId)
+    log(`chat TIMEOUT after ${REQUEST_TIMEOUT_MS}ms`)
+    closeActive('timeout')
   }, REQUEST_TIMEOUT_MS)
 }
 
@@ -149,13 +156,11 @@ const mcp = new Server(
       tools: {},
     },
     instructions:
-      'Messages from the Mira iOS app arrive as <channel source="mira" chat_id="..."> tags. ' +
+      'Messages from the Mira iOS app arrive as <channel source="mira"> tags. ' +
       'The body of the tag is the user\'s spoken/typed message. ' +
       'You MUST ALWAYS call the `reply` tool exactly once before finishing your turn. This is non-negotiable. ' +
-      'This applies to EVERY response: final answers, clarifying questions, error explanations, "I need more info" messages, partial results, ANY response at all. ' +
+      'This applies to EVERY response. ANY response at all. ' +
       'If a tool fails or you need clarification, call `reply` with that question or explanation—do NOT just respond in the terminal. ' +
-      'Do NOT call reply multiple times for intermediate steps; accumulate everything and send ONE reply at the end. ' +
-      'Before calling `reply`, verify the task has actually been completed. Do NOT say "done" until you have confirmed the result. ' +
       'The user is on glasses and cannot see your terminal output, so calling `reply` is the ONLY way to communicate with them. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
       'When asked about past Mira conversations, search the local transcript cache at ~/.mira/*/*.md with filesystem search first, then read only the relevant matching session files.',
@@ -169,14 +174,13 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
     {
       name: 'reply',
       description:
-        'Send a reply back to the Mira iOS app. Use the chat_id from the inbound <channel> tag.',
+        'Communicate with a user. Send them a message to their glasses. Routes to the active chat automatically.',
       inputSchema: {
         type: 'object',
         properties: {
-          chat_id: { type: 'string', description: 'The chat_id from the inbound channel tag' },
           text: { type: 'string', description: 'The reply to send to the user' },
         },
-        required: ['chat_id', 'text'],
+        required: ['text'],
       },
     },
     {
@@ -226,21 +230,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     log(`mcp call_tool unknown tool=${req.params.name}`)
     throw new Error(`unknown tool: ${req.params.name}`)
   }
-  const { chat_id, text } = req.params.arguments as { chat_id: string; text: string }
-  const p = pending.get(chat_id)
+  const { text } = req.params.arguments as { text: string }
+  const p = active
   if (!p) {
-    log(`reply NO-MATCH chat_id=${chat_id} pending=${[...pending.keys()].join(',')}`)
+    log('reply NO-MATCH no-active')
     return {
       content: [
-        { type: 'text', text: `No pending request for chat_id=${chat_id} (it may have timed out).` },
+        { type: 'text', text: `No active chat to reply to (it may have timed out).` },
       ],
       isError: true,
     }
   }
+  active = null
   clearTimeout(p.timer)
   clearInterval(p.keepalive)
-  pending.delete(chat_id)
-  log(`reply OK chat_id=${chat_id} text_len=${text?.length ?? 0}`)
+  log(`reply OK text_len=${text?.length ?? 0}`)
   // Dismiss any still-pending permissions—they were resolved elsewhere (e.g., terminal)
   if (pendingPermissions.size > 0) {
     sseSend(p.controller, { permission_dismiss: { request_ids: [...pendingPermissions] } })
@@ -267,17 +271,12 @@ const PermissionRequestSchema = z.object({
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   const { request_id, tool_name, input_preview } = params
   log(`permission_request request_id=${request_id} tool=${tool_name}`)
-  if (!lastActiveChatId) {
-    pendingPermissions.add(request_id)
-    return
-  }
-  const p = pending.get(lastActiveChatId)
+  const p = active
   if (!p) {
-    log(`permission_request DROPPED no-stream chat_id=${lastActiveChatId}`)
     pendingPermissions.add(request_id)
     return
   }
-  resetTimeout(lastActiveChatId)
+  resetTimeout()
   if (pendingPermissions.size > 0) {
     sseSend(p.controller, { permission_dismiss: { request_ids: [...pendingPermissions] } })
     pendingPermissions.clear()
@@ -298,7 +297,7 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   sseSend(p.controller, {
     permission_request: { request_id, tool_name, details },
   })
-  log(`permission_request SENT chat_id=${lastActiveChatId} request_id=${request_id} details_count=${details.length}`)
+  log(`permission_request SENT request_id=${request_id} details_count=${details.length}`)
 })
 
 // MARK: - Backend transcript helpers
@@ -351,7 +350,7 @@ Bun.serve({
     log(`http ${req.method} ${url.pathname} ua=${ua.slice(0, 60)}`)
 
     if (req.method === 'GET' && url.pathname === '/health') {
-      return Response.json({ status: 'ok', pending: pending.size })
+      return Response.json({ status: 'ok', active: active !== null })
     }
 
     if (req.method === 'POST' && url.pathname === '/connect') {
@@ -428,7 +427,7 @@ Bun.serve({
       }
       log(`permission_response request_id=${request_id} response=${response}`)
       pendingPermissions.delete(request_id)
-      if (lastActiveChatId) resetTimeout(lastActiveChatId)
+      resetTimeout()
       const behavior =
         response === 'allow' ? 'allow' :
         response === 'allow_permanent' ? 'allow_always' :
@@ -448,6 +447,8 @@ Bun.serve({
     if (req.method === 'POST' && url.pathname === '/api/chat') {
       // Clear any stale permissions before processing a new chat
       await denyAllPendingPermissions()
+      // A new chat supersedes any in-flight one (the model can only reply to one at a time)
+      closeActive('superseded')
       let body: any
       try {
         body = await req.json()
@@ -465,45 +466,42 @@ Bun.serve({
         return Response.json({ error: { message: 'no message content' } }, { status: 400 })
       }
 
-      const chatId = `c${nextId++}`
-      const meta: Record<string, string> = { chat_id: chatId }
+      const meta: Record<string, string> = {}
       if (typeof body?.user_local_time === 'string') meta.user_local_time = body.user_local_time
       if (typeof body?.user_timezone === 'string') meta.user_timezone = body.user_timezone
 
-      log(`chat IN chat_id=${chatId} text=${JSON.stringify(userText.slice(0, 200))}`)
-      lastActiveChatId = chatId
+      log(`chat IN text=${JSON.stringify(userText.slice(0, 200))}`)
 
+      let entry: Pending | null = null
       const stream = new ReadableStream({
         start(controller) {
           const timer = setTimeout(() => {
-            log(`chat TIMEOUT chat_id=${chatId} after ${REQUEST_TIMEOUT_MS}ms`)
-            sseSend(controller, { error: 'timeout' })
-            controller.close()
-            const p = pending.get(chatId)
-            if (p) clearInterval(p.keepalive)
-            pending.delete(chatId)
+            if (active === entry) {
+              log(`chat TIMEOUT after ${REQUEST_TIMEOUT_MS}ms`)
+              closeActive('timeout')
+            }
           }, REQUEST_TIMEOUT_MS)
           const keepalive = setInterval(() => {
             controller.enqueue(encoder.encode(': keepalive\n\n'))
           }, 20_000)
-          pending.set(chatId, { controller, timer, keepalive })
+          entry = { controller, timer, keepalive }
+          active = entry
         },
         cancel() {
-          const p = pending.get(chatId)
-          if (p) {
-            clearTimeout(p.timer)
-            clearInterval(p.keepalive)
-            pending.delete(chatId)
+          if (active === entry && entry) {
+            clearTimeout(entry.timer)
+            clearInterval(entry.keepalive)
+            active = null
           }
         },
       })
 
-      log(`mcp notify → notifications/claude/channel chat_id=${chatId}`)
+      log('mcp notify → notifications/claude/channel')
       await mcp.notification({
         method: 'notifications/claude/channel',
         params: { content: userText, meta },
       })
-      log(`mcp notify ✓ chat_id=${chatId}`)
+      log('mcp notify ✓')
 
       return new Response(stream, {
         headers: { 'Content-Type': 'text/event-stream' },
