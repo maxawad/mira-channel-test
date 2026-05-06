@@ -4,7 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { appendFileSync } from 'fs'
-import { openTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
+import { openTunnel, getTunnelUrl, getTunnelError, getTunnelMode, isTunnelRunning } from './cloudflare'
 
 const PORT = Number(process.env.MIRA_PORT ?? 3141)
 const REQUEST_TIMEOUT_MS = 120_000
@@ -185,9 +185,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'help') {
     const tunnelUrl = getTunnelUrl()
     const tunnelError = getTunnelError()
+    const tunnelMode = getTunnelMode()
     let statusLine: string
     if (tunnelUrl) {
       statusLine = `Mira tunnel URL: ${tunnelUrl}`
+    } else if (tunnelMode === 'named' && isTunnelRunning()) {
+      statusLine =
+        'Mira named Cloudflare tunnel is running, but no public URL is configured in MIRA_TUNNEL_URL.'
     } else if (tunnelError) {
       statusLine = `Tunnel unavailable: ${tunnelError}`
     } else {
@@ -199,6 +203,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           type: 'text',
           text:
             `${statusLine}\n\n` +
+            `To use a named Cloudflare tunnel, set MIRA_CLOUDFLARED_TOKEN and MIRA_TUNNEL_URL before starting Claude Code.\n\n` +
             `If messages from the iOS app aren't reaching Claude, restart Claude Code with:\n` +
             `  claude --dangerously-load-development-channels plugin:mira@mira-marketplace\n` +
             `That flag is required for Claude Code to surface inbound channel notifications from this plugin.`,

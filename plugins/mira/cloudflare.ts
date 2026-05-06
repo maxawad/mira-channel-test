@@ -1,11 +1,39 @@
 const CLOUDFLARED_DIR = `${process.env.HOME}/.mira-mcp`
 const CLOUDFLARED_PATH = `${CLOUDFLARED_DIR}/cloudflared`
+const TOKEN_PATH = `${CLOUDFLARED_DIR}/cloudflared.token`
+const CONFIGURED_URL_PATH = `${CLOUDFLARED_DIR}/cloudflared.url`
+const URL_PATH = `${CLOUDFLARED_DIR}/tunnel.url`
 
 let tunnelUrl: string | null = null
 let tunnelError: string | null = null
+let tunnelMode: 'quick' | 'named' = 'quick'
+let tunnelRunning = false
 
 export const getTunnelUrl = () => tunnelUrl
 export const getTunnelError = () => tunnelError
+export const getTunnelMode = () => tunnelMode
+export const isTunnelRunning = () => tunnelRunning
+
+async function readOptionalFile(path: string): Promise<string | null> {
+  const value = (await Bun.file(path).text().catch(() => '')).trim()
+  return value || null
+}
+
+async function readTunnelToken(): Promise<string | null> {
+  return (
+    process.env.MIRA_CLOUDFLARED_TOKEN?.trim() ||
+    process.env.CLOUDFLARED_TUNNEL_TOKEN?.trim() ||
+    await readOptionalFile(TOKEN_PATH)
+  )
+}
+
+async function readConfiguredTunnelUrl(): Promise<string | null> {
+  return (
+    process.env.MIRA_TUNNEL_URL?.trim() ||
+    process.env.CLOUDFLARED_TUNNEL_URL?.trim() ||
+    await readOptionalFile(CONFIGURED_URL_PATH)
+  )
+}
 
 async function ensureCloudflared(log: (msg: string) => void): Promise<string> {
   if (await Bun.file(CLOUDFLARED_PATH).exists()) return CLOUDFLARED_PATH
@@ -26,27 +54,53 @@ async function ensureCloudflared(log: (msg: string) => void): Promise<string> {
 
 export async function openTunnel(port: number, log: (msg: string) => void): Promise<void> {
   const binary = await ensureCloudflared(log)
-  log('tunnel opening (cloudflared quick tunnel)')
-  const proc = Bun.spawn([binary, 'tunnel', '--url', `http://127.0.0.1:${port}`], {
+  const token = await readTunnelToken()
+  const configuredUrl = await readConfiguredTunnelUrl()
+
+  if (configuredUrl) {
+    tunnelUrl = configuredUrl
+    await Bun.write(URL_PATH, `${configuredUrl}\n`).catch(() => {})
+  }
+
+  const args = token
+    ? ['tunnel', 'run', '--token', token]
+    : ['tunnel', '--url', `http://127.0.0.1:${port}`]
+  tunnelMode = token ? 'named' : 'quick'
+  tunnelError = token && !configuredUrl
+    ? `Named Cloudflare tunnel is starting, but no public URL is configured. Set MIRA_TUNNEL_URL or write ${CONFIGURED_URL_PATH}.`
+    : null
+
+  log(`tunnel opening (cloudflared ${tunnelMode} tunnel)`)
+  const proc = Bun.spawn([binary, ...args], {
     stderr: 'pipe',
     stdout: 'pipe',
     onExit(_, code) {
       log(`cloudflared exited code=${code}`)
+      tunnelRunning = false
       tunnelUrl = null
       tunnelError = 'Tunnel closed. Restart the plugin to reconnect.'
     },
   })
+  tunnelRunning = true
 
   ;(async () => {
     const decoder = new TextDecoder()
     let buffer = ''
     for await (const chunk of proc.stderr as ReadableStream<Uint8Array>) {
-      buffer += decoder.decode(chunk)
+      const text = decoder.decode(chunk)
+      buffer += text
+      log(`cloudflared stderr ${text.trim()}`)
       const match = buffer.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/)
       if (match && !tunnelUrl) {
         tunnelUrl = match[0]
         tunnelError = null
+        await Bun.write(URL_PATH, `${tunnelUrl}\n`).catch(() => {})
         log(`tunnel up url=${tunnelUrl}`)
+      }
+      if (tunnelMode === 'named' && /Registered tunnel connection|Connection .* registered|Starting tunnel/i.test(buffer)) {
+        tunnelError = configuredUrl
+          ? null
+          : `Named Cloudflare tunnel is running. Set MIRA_TUNNEL_URL or write ${CONFIGURED_URL_PATH} so Claude can show the app endpoint.`
       }
     }
   })()
