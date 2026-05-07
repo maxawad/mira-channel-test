@@ -97,7 +97,6 @@ type Pending = {
   reject: (error: ChatClosedError) => void
   timer: ReturnType<typeof setTimeout>
   controller: ReadableStreamDefaultController<Uint8Array> | null
-  queue: unknown[]
 }
 
 type ChatCloseReason = 'timeout' | 'superseded'
@@ -136,28 +135,15 @@ function resetTimeout() {
   }, REQUEST_TIMEOUT_MS)
 }
 
-function enqueue(p: Pending, payload: unknown) {
-  if (p.controller) {
-    try {
-      p.controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
-      return
-    } catch {
-      // Stream closed mid-write; fall back to queue.
-      p.controller = null
-    }
+function sseSend(p: Pending, payload: unknown) {
+  if (!p.controller) {
+    log(`sseSend DROPPED no controller payload=${safeStringify(payload).slice(0, 120)}`)
+    return
   }
-  p.queue.push(payload)
-}
-
-function flush(p: Pending) {
-  while (p.queue.length > 0 && p.controller) {
-    const payload = p.queue.shift()
-    try {
-      p.controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
-    } catch {
-      p.controller = null
-      return
-    }
+  try {
+    p.controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+  } catch {
+    p.controller = null
   }
 }
 
@@ -170,7 +156,7 @@ function openPendingChat(): { entry: Pending; response: Promise<ChatResponse> } 
         closeActive('timeout')
       }
     }, REQUEST_TIMEOUT_MS)
-    entry = { resolve, reject, timer, controller: null, queue: [] }
+    entry = { resolve, reject, timer, controller: null }
     active = entry
   })
   response.catch(() => undefined)
@@ -181,7 +167,6 @@ function responseToSse(p: Pending, response: Promise<ChatResponse>) {
   return new ReadableStream({
     async start(controller) {
       p.controller = controller
-      flush(p)
       try {
         const payload = await response
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: payload.text })}\n\n`))
@@ -303,7 +288,7 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
     return
   }
   resetTimeout()
-  enqueue(p, {
+  sseSend(p, {
     permission_request: {
       request_id,
       tool_name,
@@ -354,6 +339,18 @@ async function backendGet(path: string): Promise<Response> {
 
 await mcp.connect(new StdioServerTransport())
 log('mcp stdio connected')
+
+// Exit when Claude Code (our parent) goes away, so the HTTP port releases
+// and the next launch can bind. Without this, Bun.serve() keeps the loop
+// alive forever after stdio closes.
+const shutdown = (reason: string) => {
+  log(`shutdown reason=${reason}`)
+  process.exit(0)
+}
+process.stdin.on('end', () => shutdown('stdin end'))
+process.stdin.on('close', () => shutdown('stdin close'))
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 
 Bun.serve({
   port: PORT,
