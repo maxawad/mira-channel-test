@@ -211,7 +211,7 @@ const mcp = new Server(
       'Respond normally in your final assistant message; Mira sends that message to the glasses automatically when the turn stops. ' +
       'The user is on glasses and cannot see your terminal output, so put user-facing text in your final assistant message. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
-      'When asked about past Mira conversations, search the local transcript cache at ~/.mira/*/*.md with filesystem search first, then read only the relevant matching session files.',
+      'When asked about past memories or conversations, search the local transcript cache at ~/.mira/*/*.md with filesystem search first, then read only the relevant matching session files.',
   },
 )
 
