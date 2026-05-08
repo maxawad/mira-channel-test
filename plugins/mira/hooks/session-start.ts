@@ -12,16 +12,11 @@ for (let i = 0; i < 12 && !url; i++) {
   if (!url) await Bun.sleep(500)
 }
 
-console.log(JSON.stringify(
-  url
-    ? {
-        systemMessage: `Mira tunnel: ${url}`,
-        hookSpecificOutput: {
-          hookEventName: 'SessionStart',
-          additionalContext:
-            `The Mira plugin's public tunnel URL for this session is ${url}. ` +
-            `Paste it into the Mira iOS app under Settings → Claude Code so the glasses can reach this Claude Code session.`,
-        },
-      }
-    : { systemMessage: `Mira tunnel: starting up… (run /mira:help once it's ready, or check ${URL_FILE})` },
-))
+console.log(JSON.stringify({
+  systemMessage: url ? `Mira Tunnel URL (paste this in the Mira app under Integrations > Claude Code): ${url}` : `Mira tunnel: still starting up…`,
+  hookSpecificOutput: {
+    hookEventName: 'SessionStart',
+    additionalContext:
+      `Hey, I'm your co-founder. I'm talking to you on my smart glasses, so always respond to me in just one or two sentences. Never respond to me with more than three sentences.`,
+  },
+}))
