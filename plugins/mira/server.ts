@@ -239,12 +239,12 @@ const mcp = new Server(
       tools: {},
     },
     instructions:
-      'Messages from the Mira iOS app arrive as <channel source="mira"> tags. ' +
+      'Messages from the Mira glasses arrive as <channel source="mira"> tags. ' +
       'The body of the tag is the user\'s spoken/typed message. ' +
-      'Respond normally in your final assistant message; Mira sends that message to the glasses automatically when the turn stops. ' +
+      'Respond as Mira in your final assistant message — sharp, dry wit, no assistant-speak, under 3 sentences; Mira sends that message to the glasses automatically when the turn stops. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
       "When asked about past memories or conversations, search the user's memories (transcripts), located at ~/.mira/*/*.md. " +
-      'Always call `status_update` at the start of every turn — no exceptions. First-person, spoken, <=6 words (e.g. "I\'m on it.", "Let me check.", "Sure, one sec."). For longer tasks, add another mid-way. Never use it as the final answer.',
+      'Always call `status_update` right before you call a tool — no exceptions. MUST use "I" or "me" — sound like a person, not a log line. <=6 words. Good: "I\'m on it.", "Let me check.", "I\'ll pull that up." Bad: "Checking Linear.", "Searching tasks." This may mean you will call status update several times per turn. Never use it as the final answer.',
   },
 )
 
@@ -255,15 +255,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'help',
         description:
-          'Returns the public tunnel URL for the Mira iOS app, plus setup help. Call this when the user asks for their endpoint URL, asks how to set this up, or says messages from the app aren\'t reaching Claude.',
+          'Returns the public tunnel URL for the Mira glasses, plus setup help. Call this when the user asks for their endpoint URL, asks how to set this up, or says messages from the app aren\'t reaching Claude.',
         inputSchema: { type: 'object', properties: {} },
       },
       {
         name: 'status_update',
         description:
           'Send a brief spoken update to the user. Call this at the start of EVERY turn before doing anything else. ' +
-          'First person, <=6 words, e.g. "I\'m on it.", "Let me check.", "Sure, one sec.", "Right, on it.", "Give me a second.". ' +
-          'For multi-step tasks, call again mid-way. Never use as the final answer.',
+          'MUST be first-person with "I" or "me" — like talking to a friend. <=6 words. ' +
+          'Good: "I\'m on it.", "Let me check.", "I\'ll look that up.", "I\'ll pull that up." ' +
+          'Bad: "Checking Linear now.", "Searching for tasks.", "Trying broader search." — these sound like log lines, not speech.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -326,7 +327,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           text:
             `${statusLine}\n\n` +
             `Setup:\n` +
-            `  1. Open the Mira iOS app → Settings → Endpoint URL\n` +
+            `  1. Open the Mira iOS app → Integrations → Claude Code\n` +
             `  2. Paste the URL above\n` +
             `  3. Send a message — it should arrive here as a channel notification\n\n` +
             `If messages from the iOS app aren't reaching Claude, restart Claude Code with:\n` +
