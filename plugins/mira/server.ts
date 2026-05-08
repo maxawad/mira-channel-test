@@ -212,9 +212,9 @@ const mcp = new Server(
       'Messages from the Mira iOS app arrive as <channel source="mira"> tags. ' +
       'The body of the tag is the user\'s spoken/typed message. ' +
       'Respond normally in your final assistant message; Mira sends that message to the glasses automatically when the turn stops. ' +
-      'The user is on glasses and cannot see your terminal output, so put user-facing text in your final assistant message. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
-      'When asked about past memories or conversations, search the local transcript cache at ~/.mira/*/*.md with filesystem search first, then read only the relevant matching session files.',
+      "When asked about past memories or conversations, search the user's memories (transcripts), located at ~/.mira/*/*.md. " +
+      'If a turn involves real work (tool call, search, lookup), call `status_update` once at the start with a brief acknowledgement (<=8 words). Add another only if the work drags on. Skip it for instant replies. Never use it for the final answer.',
   },
 )
 
@@ -228,12 +228,55 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
           'Returns the public tunnel URL for the Mira iOS app, plus setup help. Call this when the user asks for their endpoint URL, asks how to set this up, or says messages from the app aren\'t reaching Claude.',
         inputSchema: { type: 'object', properties: {} },
       },
+      {
+        name: 'status_update',
+        description:
+          'Send a brief progress update to the Mira user mid-turn. Appears as a short AI chat bubble. ' +
+          'Call once at the start of a turn that involves real work (tool call, search, lookup) with a <=8-word acknowledgement, e.g. "On it.", "Checking.", "One sec.". ' +
+          'Add another only if the work drags on across multiple slow steps. ' +
+          'Skip entirely for instant replies. Never use this for the final answer.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            text: {
+              type: 'string',
+              description: 'Very short status message, ideally 3–8 words. Spoken-style, no markdown.',
+            },
+          },
+          required: ['text'],
+        },
+      },
     ],
   }
 })
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   log(`mcp call_tool name=${req.params.name}`, req.params.arguments)
+
+  if (req.params.name === 'status_update') {
+    const args = (req.params.arguments ?? {}) as { text?: unknown }
+    const text = typeof args.text === 'string' ? args.text.trim() : ''
+    if (!text) {
+      throw new Error('status_update requires non-empty `text`')
+    }
+    const p = active
+    if (!p) {
+      log(`status_update DROPPED no active chat text=${JSON.stringify(text.slice(0, 120))}`)
+      return {
+        content: [
+          { type: 'text', text: 'No active Mira chat — status not delivered.' },
+        ],
+      }
+    }
+    resetTimeout()
+    sseSend(p, { status_update: { text } })
+    log(`status_update OK text=${JSON.stringify(text.slice(0, 120))}`)
+    return {
+      content: [
+        { type: 'text', text: 'Status delivered to Mira. Continue working on the final answer.' },
+      ],
+    }
+  }
 
   if (req.params.name === 'help') {
     const tunnelUrl = getTunnelUrl()
