@@ -227,6 +227,8 @@ type Connection = {
   userId: string
   accessToken: string
   backendBaseUrl: string
+  firstName: string | null
+  lastName: string | null
   connectedAt: number
 }
 let connection: Connection | null = null
@@ -448,6 +450,9 @@ Bun.serve({
       const userId = (body?.user_id ?? '').toString().trim()
       const accessToken = (body?.access_token ?? '').toString().trim()
       const rawBackend = (body?.backend_base_url ?? '').toString().trim()
+      const firstName = (body?.first_name ?? '').toString().trim() || null
+      const lastName = (body?.last_name ?? '').toString().trim() || null
+
       if (!userId || !accessToken || !rawBackend) {
         log('http /connect missing fields')
         return Response.json(
@@ -469,6 +474,8 @@ Bun.serve({
         userId,
         accessToken,
         backendBaseUrl,
+        firstName,
+        lastName,
         connectedAt: Date.now(),
       }
 
@@ -609,6 +616,9 @@ Bun.serve({
       const meta: Record<string, string> = {}
       if (typeof body?.user_local_time === 'string') meta.user_local_time = body.user_local_time
       if (typeof body?.user_timezone === 'string') meta.user_timezone = body.user_timezone
+      if (connection?.firstName) meta.user_first_name = connection.firstName
+      if (connection?.lastName) meta.user_last_name = connection.lastName
+
 
       log(`chat IN text=${JSON.stringify(userText.slice(0, 200))}`)
 
