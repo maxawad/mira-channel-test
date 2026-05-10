@@ -167,7 +167,7 @@ const encoder = new TextEncoder()
 // Sessions stay reachable here so /api/chat/reconnect can find them by id
 const sessionsById = new Map<string, Pending>()
 
-const RECONNECT_RETENTION_MS = Number(process.env.MIRA_RECONNECT_RETENTION_MS ?? 60_000)
+const RECONNECT_RETENTION_MS = Number(process.env.MIRA_RECONNECT_RETENTION_MS ?? 600_000)
 
 const RECONNECT_BUFFER_CAP = 500
 
