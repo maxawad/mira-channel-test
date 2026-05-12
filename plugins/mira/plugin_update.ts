@@ -1,0 +1,86 @@
+const MARKETPLACE_NAME = 'mira-marketplace'
+const PLUGIN_NAME = 'mira'
+const UPSTREAM_COMPARE_URL =
+  'https://api.github.com/repos/big-halo/mira-claude-channel/compare'
+const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 1_000
+
+export const UPDATE_NOTICE =
+  'Plugin update available: /plugin → Marketplaces → mira-marketplace → Enable auto-update'
+
+export type UpdateState = {
+  checkedAt: number
+  stale: boolean
+  localVersion: string | null
+  status: string | null
+}
+
+export function pluginCacheVersion(root: string): string | null {
+  const parts = root.split(/[\\/]+/).filter(Boolean)
+  for (let i = 0; i < parts.length - 3; i++) {
+    if (
+      parts[i] === 'cache' &&
+      parts[i + 1] === MARKETPLACE_NAME &&
+      parts[i + 2] === PLUGIN_NAME
+    ) {
+      const version = parts[i + 3]
+      if (/^[0-9a-f]{7,40}$/i.test(version)) return version
+    }
+  }
+  return null
+}
+
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'mira-claude-channel',
+      },
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function checkPluginUpdateState({
+  pluginRoot,
+  timeoutMs = DEFAULT_UPDATE_CHECK_TIMEOUT_MS,
+}: {
+  pluginRoot: string
+  timeoutMs?: number
+}): Promise<UpdateState> {
+  const localVersion = pluginCacheVersion(pluginRoot)
+  if (!localVersion) {
+    return {
+      checkedAt: Date.now(),
+      stale: false,
+      localVersion: null,
+      status: 'unknown_local_version',
+    }
+  }
+
+  const compareUrl =
+    `${UPSTREAM_COMPARE_URL}/${encodeURIComponent(localVersion)}...main`
+  const res = await fetchWithTimeout(compareUrl, timeoutMs)
+  if (!res.ok) {
+    throw new Error(`github_compare_http_${res.status}`)
+  }
+
+  const data = await res.json() as { status?: unknown }
+  const status = typeof data.status === 'string' ? data.status : 'unknown'
+  return {
+    checkedAt: Date.now(),
+    stale: status === 'ahead' || status === 'diverged',
+    localVersion,
+    status,
+  }
+}
+
+export function appendUpdateNotice(text: string, state: UpdateState): string {
+  if (!state.stale || text.includes(UPDATE_NOTICE)) return text
+  return `${text.trimEnd()}\n\n${UPDATE_NOTICE}`
+}
+
