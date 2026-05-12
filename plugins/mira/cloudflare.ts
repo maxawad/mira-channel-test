@@ -1,15 +1,10 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs'
+import { mkdirSync, writeFileSync, unlinkSync } from 'fs'
 
 const CLOUDFLARED_DIR = `${process.env.HOME}/.mira-mcp`
 const CLOUDFLARED_PATH = `${CLOUDFLARED_DIR}/cloudflared`
-const TUNNEL_CACHE_DIR = `${CLOUDFLARED_DIR}/tunnels`
 // Persisted on disk so the SessionStart hook can read the current tunnel URL
 // without talking to the MCP server.
 const TUNNEL_URL_FILE = `${CLOUDFLARED_DIR}/tunnel.url`
-
-function tunnelCachePath(deviceId: string) {
-  return `${TUNNEL_CACHE_DIR}/${deviceId}.json`
-}
 
 let tunnelUrl: string | null = null
 let tunnelError: string | null = null
@@ -90,40 +85,12 @@ async function fetchProvisionedTunnel(opts: ProvisionOptions): Promise<Provision
   }
 }
 
-function readProvisionedCache(deviceId: string, log: (msg: string) => void): ProvisionResponse | null {
-  const path = tunnelCachePath(deviceId)
-  if (!existsSync(path)) return null
-  try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as ProvisionResponse
-    if (!parsed?.hostname || !parsed?.token) return null
-    return parsed
-  } catch (err) {
-    log(`tunnel cache read failed: ${(err as Error).message}`)
-    return null
-  }
-}
-
-function writeProvisionedCache(deviceId: string, data: ProvisionResponse, log: (msg: string) => void) {
-  try {
-    mkdirSync(TUNNEL_CACHE_DIR, { recursive: true })
-    writeFileSync(tunnelCachePath(deviceId), JSON.stringify(data), { mode: 0o600 })
-  } catch (err) {
-    log(`tunnel cache write failed: ${(err as Error).message}`)
-  }
-}
-
 export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<void> {
   clearTunnelUrlFile(opts.log)
 
-  let provisioned = readProvisionedCache(opts.deviceId, opts.log)
+  const provisioned = await fetchProvisionedTunnel(opts)
   if (provisioned) {
-    opts.log(`tunnel cache hit hostname=${provisioned.hostname}`)
-  } else {
-    provisioned = await fetchProvisionedTunnel(opts)
-    if (provisioned) {
-      writeProvisionedCache(opts.deviceId, provisioned, opts.log)
-      opts.log(`tunnel provisioned hostname=${provisioned.hostname}`)
-    }
+    opts.log(`tunnel provisioned hostname=${provisioned.hostname}`)
   }
 
   if (!provisioned) {
