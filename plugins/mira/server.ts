@@ -15,6 +15,15 @@ const REQUEST_TIMEOUT_MS = 120_000
 // status_update / tool_status events are firing.
 const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 15_000)
 const TUNNEL_BACKEND_URL = 'http://localhost:8000'
+const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
+const MARKETPLACE_NAME = 'mira-marketplace'
+const PLUGIN_NAME = 'mira'
+const UPSTREAM_COMPARE_URL =
+  'https://api.github.com/repos/big-halo/mira-claude-channel/compare'
+const UPDATE_NOTICE =
+  'Plugin update available: /plugin → Marketplaces → mira-marketplace → Enable auto-update'
+const UPDATE_CHECK_TTL_MS = 5 * 60_000
+const UPDATE_CHECK_TIMEOUT_MS = 1_000
 
 const LOG_FILE = process.env.MIRA_LOG ?? '/tmp/mira.log'
 function log(msg: string, extra?: unknown) {
@@ -41,6 +50,112 @@ function safeStringify(value: unknown): string {
 function basename(p: string): string {
   const i = p.lastIndexOf('/')
   return i >= 0 ? p.slice(i + 1) : p
+}
+
+type UpdateState = {
+  checkedAt: number
+  stale: boolean
+  localVersion: string | null
+  status: string | null
+}
+
+let updateState: UpdateState = {
+  checkedAt: 0,
+  stale: false,
+  localVersion: null,
+  status: null,
+}
+let updateCheckInFlight: Promise<UpdateState> | null = null
+
+function pluginCacheVersion(root: string): string | null {
+  const parts = root.split(/[\\/]+/).filter(Boolean)
+  for (let i = 0; i < parts.length - 3; i++) {
+    if (
+      parts[i] === 'cache' &&
+      parts[i + 1] === MARKETPLACE_NAME &&
+      parts[i + 2] === PLUGIN_NAME
+    ) {
+      const version = parts[i + 3]
+      if (/^[0-9a-f]{7,40}$/i.test(version)) return version
+    }
+  }
+  return null
+}
+
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'mira-claude-channel',
+      },
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function refreshUpdateState(): Promise<UpdateState> {
+  const localVersion = pluginCacheVersion(PLUGIN_ROOT)
+  if (!localVersion) {
+    updateState = {
+      checkedAt: Date.now(),
+      stale: false,
+      localVersion: null,
+      status: 'unknown_local_version',
+    }
+    return updateState
+  }
+
+  const compareUrl =
+    `${UPSTREAM_COMPARE_URL}/${encodeURIComponent(localVersion)}...main`
+  const res = await fetchWithTimeout(compareUrl, UPDATE_CHECK_TIMEOUT_MS)
+  if (!res.ok) {
+    throw new Error(`github_compare_http_${res.status}`)
+  }
+
+  const data = await res.json() as { status?: unknown }
+  const status = typeof data.status === 'string' ? data.status : 'unknown'
+  updateState = {
+    checkedAt: Date.now(),
+    stale: status === 'ahead' || status === 'diverged',
+    localVersion,
+    status,
+  }
+  log(`plugin update check local=${localVersion} status=${status} stale=${updateState.stale}`)
+  return updateState
+}
+
+async function currentUpdateState(): Promise<UpdateState> {
+  const now = Date.now()
+  if (now - updateState.checkedAt < UPDATE_CHECK_TTL_MS) return updateState
+
+  if (!updateCheckInFlight) {
+    updateCheckInFlight = refreshUpdateState()
+      .catch((err) => {
+        log(`plugin update check failed: ${(err as Error).message}`)
+        updateState = {
+          ...updateState,
+          checkedAt: Date.now(),
+          status: 'check_failed',
+        }
+        return updateState
+      })
+      .finally(() => {
+        updateCheckInFlight = null
+      })
+  }
+
+  return updateCheckInFlight
+}
+
+async function withUpdateNotice(text: string): Promise<string> {
+  const state = await currentUpdateState()
+  if (!state.stale || text.includes(UPDATE_NOTICE)) return text
+  return `${text.trimEnd()}\n\n${UPDATE_NOTICE}`
 }
 
 // Generic "Tool: <hint>" formatter. We don't hardcode per-tool rules; instead
@@ -736,9 +851,10 @@ Bun.serve({
         return Response.json({ status: 'ignored', reason: 'no_active_chat' })
       }
 
+      const responseText = await withUpdateNotice(text)
       active = null
       clearTimeout(p.timer)
-      p.resolve({ text, sources: [], debug: null })
+      p.resolve({ text: responseText, sources: [], debug: null })
       return Response.json({ status: 'delivered' })
     }
 
@@ -828,6 +944,10 @@ Bun.serve({
 })
 
 log(`http listener up on http://127.0.0.1:${PORT}`)
+
+void currentUpdateState().catch((err) => {
+  log(`plugin update check failed: ${(err as Error).message}`)
+})
 
 // Provision the persistent Cloudflare tunnel on boot.
 const device = getOrCreateDevice()
