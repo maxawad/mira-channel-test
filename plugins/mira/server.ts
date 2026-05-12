@@ -11,6 +11,9 @@ import { homedir } from 'os'
 
 const PORT = Number(process.env.MIRA_PORT ?? 3141)
 const REQUEST_TIMEOUT_MS = 120_000
+// Periodic SSE comment to keep idle connections alive when no
+// status_update / tool_status events are firing.
+const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 15_000)
 const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
 
 const LOG_FILE = process.env.MIRA_LOG ?? '/tmp/mira.log'
@@ -122,11 +125,25 @@ async function syncConversationsToMarkdown() {
 
 log(`boot pid=${process.pid} port=${PORT} log=${LOG_FILE}`)
 
+type BufferedEvent = { id: number; payload: string }
+
 type Pending = {
+  // The session id is shipped to the client in the first SSE event so a
+  // dropped connection can reattach via /api/chat/reconnect without sending
+  // the user's message to Claude a second time.
+  sessionId: string
   resolve: (response: ChatResponse) => void
   reject: (error: ChatClosedError) => void
   timer: ReturnType<typeof setTimeout>
   controller: ReadableStreamDefaultController<Uint8Array> | null
+
+  buffer: BufferedEvent[]
+  nextEventId: number
+
+  doneSent: boolean
+  cleanupTimer: ReturnType<typeof setTimeout> | null
+
+  responsePromise: Promise<ChatResponse> | null
 }
 
 type ChatCloseReason = 'timeout' | 'superseded'
@@ -147,6 +164,28 @@ class ChatClosedError extends Error {
 let active: Pending | null = null
 const encoder = new TextEncoder()
 
+// Sessions stay reachable here so /api/chat/reconnect can find them by id
+const sessionsById = new Map<string, Pending>()
+
+const RECONNECT_RETENTION_MS = Number(process.env.MIRA_RECONNECT_RETENTION_MS ?? 600_000)
+
+const RECONNECT_BUFFER_CAP = 500
+
+function newSessionId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+function scheduleSessionCleanup(p: Pending) {
+  if (p.cleanupTimer) clearTimeout(p.cleanupTimer)
+  p.cleanupTimer = setTimeout(() => {
+    sessionsById.delete(p.sessionId)
+    log(`session GC id=${p.sessionId}`)
+  }, RECONNECT_RETENTION_MS)
+}
+
 function closeActive(reason: ChatCloseReason) {
   const p = active
   if (!p) return
@@ -165,13 +204,24 @@ function resetTimeout() {
   }, REQUEST_TIMEOUT_MS)
 }
 
-function sseSend(p: Pending, payload: unknown) {
+function appendToBuffer(p: Pending, encoded: string): number {
+  const id = p.nextEventId++
+  p.buffer.push({ id, payload: encoded })
+  if (p.buffer.length > RECONNECT_BUFFER_CAP) {
+    p.buffer.splice(0, p.buffer.length - RECONNECT_BUFFER_CAP)
+  }
+  return id
+}
+
+function broadcast(p: Pending, payload: unknown) {
+  const data = JSON.stringify(payload)
+  const id = appendToBuffer(p, data)
   if (!p.controller) {
-    log(`sseSend DROPPED no controller payload=${safeStringify(payload).slice(0, 120)}`)
+    log(`broadcast DROPPED no controller id=${id} payload=${data.slice(0, 120)}`)
     return
   }
   try {
-    p.controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+    p.controller.enqueue(encoder.encode(`id: ${id}\ndata: ${data}\n\n`))
   } catch {
     p.controller = null
   }
@@ -186,32 +236,131 @@ function openPendingChat(): { entry: Pending; response: Promise<ChatResponse> } 
         closeActive('timeout')
       }
     }, REQUEST_TIMEOUT_MS)
-    entry = { resolve, reject, timer, controller: null }
+    entry = {
+      sessionId: newSessionId(),
+      resolve,
+      reject,
+      timer,
+      controller: null,
+      buffer: [],
+      nextEventId: 1,
+      doneSent: false,
+      cleanupTimer: null,
+      responsePromise: null,
+    }
     active = entry
+    sessionsById.set(entry.sessionId, entry)
   })
   response.catch(() => undefined)
+  entry.responsePromise = response
   return { entry, response }
+}
+
+function emitDone(p: Pending) {
+  if (p.doneSent) return
+  const id = appendToBuffer(p, '[DONE]')
+  if (p.controller) {
+    try {
+      p.controller.enqueue(encoder.encode(`id: ${id}\ndata: [DONE]\n\n`))
+    } catch {
+      p.controller = null
+    }
+  }
+  p.doneSent = true
+  scheduleSessionCleanup(p)
+}
+
+async function runStreamLifecycle(
+  p: Pending,
+  response: Promise<ChatResponse>,
+  controller: ReadableStreamDefaultController<Uint8Array>,
+) {
+  let heartbeat: ReturnType<typeof setInterval> | null = setInterval(() => {
+    if (!p.controller) return
+    try {
+      p.controller.enqueue(encoder.encode(`: keepalive ${Date.now()}\n\n`))
+    } catch {
+      if (heartbeat) {
+        clearInterval(heartbeat)
+        heartbeat = null
+      }
+      p.controller = null
+    }
+  }, SSE_HEARTBEAT_MS)
+  try {
+    const payload = await response
+    if (!p.doneSent) {
+      broadcast(p, { text: payload.text })
+      broadcast(p, { sources: payload.sources })
+      emitDone(p)
+    }
+  } catch (err) {
+    const message = err instanceof ChatClosedError ? err.reason : 'failed'
+    if (!p.doneSent) {
+      broadcast(p, { error: message })
+    }
+    scheduleSessionCleanup(p)
+  } finally {
+    if (heartbeat) {
+      clearInterval(heartbeat)
+      heartbeat = null
+    }
+    if (p.controller === controller) p.controller = null
+    try {
+      controller.close()
+    } catch {
+      // already closed
+    }
+  }
 }
 
 function responseToSse(p: Pending, response: Promise<ChatResponse>) {
   return new ReadableStream({
     async start(controller) {
       p.controller = controller
-      try {
-        const payload = await response
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: payload.text })}\n\n`))
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ sources: payload.sources })}\n\n`))
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'))
-      } catch (err) {
-        const message = err instanceof ChatClosedError ? err.reason : 'failed'
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: message })}\n\n`))
-      } finally {
-        p.controller = null
-        controller.close()
-      }
+      // Tell the client its session id up-front so it can reconnect.
+      broadcast(p, { session_id: p.sessionId })
+      await runStreamLifecycle(p, response, controller)
     },
     cancel() {
-      p.controller = null
+      if (p.controller) p.controller = null
+    },
+  })
+}
+
+
+function reattachToSession(p: Pending, response: Promise<ChatResponse>, lastEventId: number) {
+  return new ReadableStream({
+    async start(controller) {
+      p.controller = controller
+      const missed = p.buffer.filter(e => e.id > lastEventId)
+      for (const e of missed) {
+        try {
+          controller.enqueue(encoder.encode(`id: ${e.id}\ndata: ${e.payload}\n\n`))
+        } catch {
+          p.controller = null
+          return
+        }
+      }
+      log(`reconnect REPLAY id=${p.sessionId} after=${lastEventId} sent=${missed.length} done=${p.doneSent}`)
+
+      if (p.doneSent) {
+        try {
+          controller.close()
+        } catch {
+        }
+        if (p.controller === controller) p.controller = null
+        return
+      }
+
+      if (p.cleanupTimer) {
+        clearTimeout(p.cleanupTimer)
+        p.cleanupTimer = null
+      }
+      await runStreamLifecycle(p, response, controller)
+    },
+    cancel() {
+      if (p.controller) p.controller = null
     },
   })
 }
@@ -296,7 +445,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
     }
     resetTimeout()
-    sseSend(p, { status_update: { text } })
+    const displayText = text.endsWith('...') ? text : `${text}...`
+    broadcast(p, { status_update: { text: displayText } })
     log(`status_update OK text=${JSON.stringify(text.slice(0, 120))}`)
     return {
       content: [
@@ -358,7 +508,7 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
     return
   }
   resetTimeout()
-  sseSend(p, {
+  broadcast(p, {
     permission_request: {
       request_id,
       tool_name,
@@ -539,8 +689,8 @@ Bun.serve({
         return Response.json({ status: 'ignored', reason: 'missing_tool_name' })
       }
 
-      // Skip our own status_update tool — it already shows as a chat bubble on iOS.
-      if (toolName === 'mcp__mira__status_update') {
+      // Skip our own status_update tool — it already shows as a chat bubble on iOS
+      if (toolName.endsWith('__status_update')) {
         return Response.json({ status: 'ignored', reason: 'self_tool' })
       }
 
@@ -558,7 +708,7 @@ Bun.serve({
         display_name: display,
         include_in_tools_used: true,
       }
-      sseSend(p, { tool_status: payload })
+      broadcast(p, { tool_status: payload })
       log(`tool_status ${state} tool=${toolName} call_id=${toolUseId ?? '(none)'} display=${JSON.stringify(display)}`)
       return Response.json({ status: 'delivered' })
     }
@@ -588,6 +738,30 @@ Bun.serve({
       clearTimeout(p.timer)
       p.resolve({ text, sources: [], debug: null })
       return Response.json({ status: 'delivered' })
+    }
+
+    // Reattach a fresh SSE stream to an existing chat session.
+    if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/api/chat/reconnect') {
+      const sessionId = url.searchParams.get('session_id')
+      if (!sessionId) {
+        return Response.json({ error: { message: 'missing session_id' } }, { status: 400 })
+      }
+      const p = sessionsById.get(sessionId)
+      if (!p) {
+        log(`reconnect MISS session_id=${sessionId}`)
+        return Response.json({ error: { message: 'unknown session' } }, { status: 404 })
+      }
+      const headerLastId = req.headers.get('last-event-id')
+      const queryLastId = url.searchParams.get('last_event_id')
+      const lastEventIdRaw = headerLastId ?? queryLastId
+      const lastEventId = lastEventIdRaw != null && lastEventIdRaw.trim() !== ''
+        ? Number(lastEventIdRaw)
+        : 0
+      log(`reconnect IN session_id=${sessionId} last_event_id=${lastEventId} done=${p.doneSent}`)
+      const responsePromise = p.responsePromise ?? Promise.reject(new ChatClosedError('superseded'))
+      return new Response(reattachToSession(p, responsePromise, isFinite(lastEventId) ? lastEventId : 0), {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
     }
 
     if (req.method === 'POST' && url.pathname === '/api/chat') {
