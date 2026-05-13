@@ -65,11 +65,11 @@ try {
   } else if (!channelsActive) {
     systemMessage = CHANNELS_REQUIRED_MESSAGE
   } else {
-    systemMessage = 'Mira is live — glasses connected, tunnel coming in hot 👾'
+    systemMessage = 'Mira is live — glasses connected, tunnel coming in hot 🦾'
   }
 } catch {
   systemMessage = channelsActive
-    ? 'Mira is live — glasses connected, tunnel coming in hot 👾'
+    ? 'Mira is live — glasses connected, tunnel coming in hot 🦾'
     : CHANNELS_REQUIRED_MESSAGE
 }
 

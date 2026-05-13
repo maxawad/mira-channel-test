@@ -1,8 +1,10 @@
+import { join } from 'path'
+
 const MARKETPLACE_NAME = 'mira-marketplace'
 const PLUGIN_NAME = 'mira'
-const UPSTREAM_COMPARE_URL =
-  'https://api.github.com/repos/big-halo/mira-claude-channel/compare'
-const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 1_000
+const REMOTE_PACKAGE_URL =
+  'https://raw.githubusercontent.com/maxawad/mira-channel-test/main/plugins/mira/package.json'
+const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 3_000
 
 export const UPDATE_NOTICE =
   'Plugin update required: /plugin → Marketplaces → mira-marketplace → update to latest + enable auto-update, then run /reload-plugins'
@@ -38,10 +40,10 @@ export type UpdateState = {
   checkedAt: number
   stale: boolean
   localVersion: string | null
-  status: string | null
+  remoteVersion: string | null
 }
 
-/** Show the tunnel URL only when the plugin is not stale (latest version = auto-update is working). */
+/** Show the tunnel URL only when the plugin is not stale. */
 export function canShowTunnelUrl(state: UpdateState): boolean {
   return !state.stale
 }
@@ -51,32 +53,20 @@ export const CHANNELS_REQUIRED_MESSAGE =
   '  claude --dangerously-load-development-channels plugin:mira@mira-marketplace\n' +
   '(or use the `mira` alias if you have it :)'
 
-export function pluginCacheVersion(root: string): string | null {
-  const parts = root.split(/[\\/]+/).filter(Boolean)
-  for (let i = 0; i < parts.length - 3; i++) {
-    if (
-      parts[i] === 'cache' &&
-      parts[i + 1] === MARKETPLACE_NAME &&
-      parts[i + 2] === PLUGIN_NAME
-    ) {
-      const version = parts[i + 3]
-      if (/^[0-9a-f]{7,40}$/i.test(version)) return version
-    }
+function localPluginVersion(pluginRoot: string): string | null {
+  try {
+    const pkg = JSON.parse(Bun.file(join(pluginRoot, 'package.json')).textSync())
+    return typeof pkg.version === 'string' ? pkg.version : null
+  } catch {
+    return null
   }
-  return null
 }
 
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(url, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'mira-claude-channel',
-      },
-      signal: controller.signal,
-    })
+    return await fetch(url, { signal: controller.signal })
   } finally {
     clearTimeout(timer)
   }
@@ -89,35 +79,23 @@ export async function checkPluginUpdateState({
   pluginRoot: string
   timeoutMs?: number
 }): Promise<UpdateState> {
-  const localVersion = pluginCacheVersion(pluginRoot)
-  if (!localVersion) {
-    return {
-      checkedAt: Date.now(),
-      stale: false,
-      localVersion: null,
-      status: 'unknown_local_version',
-    }
-  }
+  const localVersion = localPluginVersion(pluginRoot)
 
-  const compareUrl =
-    `${UPSTREAM_COMPARE_URL}/${encodeURIComponent(localVersion)}...main`
-  const res = await fetchWithTimeout(compareUrl, timeoutMs)
-  if (!res.ok) {
-    throw new Error(`github_compare_http_${res.status}`)
-  }
+  const res = await fetchWithTimeout(REMOTE_PACKAGE_URL, timeoutMs)
+  if (!res.ok) throw new Error(`remote_package_http_${res.status}`)
 
-  const data = await res.json() as { status?: unknown }
-  const status = typeof data.status === 'string' ? data.status : 'unknown'
-  return {
-    checkedAt: Date.now(),
-    stale: status === 'ahead' || status === 'diverged',
-    localVersion,
-    status,
-  }
+  const data = await res.json() as { version?: unknown }
+  const remoteVersion = typeof data.version === 'string' ? data.version : null
+
+  const stale =
+    localVersion !== null &&
+    remoteVersion !== null &&
+    localVersion !== remoteVersion
+
+  return { checkedAt: Date.now(), stale, localVersion, remoteVersion }
 }
 
 export function appendUpdateNotice(text: string, state: UpdateState): string {
   if (!state.stale || text.includes(UPDATE_NOTICE)) return text
   return `${text.trimEnd()}\n\n${UPDATE_NOTICE}`
 }
-
