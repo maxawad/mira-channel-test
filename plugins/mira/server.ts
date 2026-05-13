@@ -904,24 +904,8 @@ void openProvisionedTunnel({
   log,
 })
   .then(async () => {
-    const url = getTunnelUrl()
     const err = getTunnelError()
-    if (url) {
-      const state = await currentUpdateState().catch(() => updateState)
-      if (canShowTunnelUrl(state)) {
-        try {
-          await mcp.notification({
-            method: 'notifications/claude/channel',
-            params: {
-              content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}`,
-            },
-          })
-          log(`tunnel URL pushed via channel url=${url}`)
-        } catch (notifyErr) {
-          log(`tunnel channel notify failed: ${(notifyErr as Error).message}`)
-        }
-      }
-    } else if (err) {
+    if (err) {
       try {
         await mcp.notification({
           method: 'notifications/claude/channel',

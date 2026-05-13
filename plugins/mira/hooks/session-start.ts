@@ -42,34 +42,38 @@ function hasChannelsFlag(): boolean {
 
 const channelsActive = hasChannelsFlag()
 
-// When channels are active the URL will arrive via channel notification — skip
-// the polling loop so we output the placeholder fast and win the race.
+// Poll for tunnel URL regardless of channels mode — embed it directly in the startup message.
 let url = ''
 let tunnelError = ''
-if (!channelsActive) {
-  for (let i = 0; i < 12 && !url; i++) {
-    url = (await Bun.file(URL_FILE).text().catch(() => '')).trim()
-    tunnelError = (await Bun.file(ERROR_FILE).text().catch(() => '')).trim()
-    if (!url && !tunnelError) await Bun.sleep(500)
-  }
+for (let i = 0; i < 12 && !url && !tunnelError; i++) {
+  url = (await Bun.file(URL_FILE).text().catch(() => '')).trim()
+  tunnelError = (await Bun.file(ERROR_FILE).text().catch(() => '')).trim()
+  if (!url && !tunnelError) await Bun.sleep(500)
 }
 
 const agentPrompt = (await Bun.file(AGENT_FILE).text().catch(() => '')).trim()
+
+const tunnelLine = url
+  ? `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}`
+  : tunnelError
+    ? `Mira tunnel unavailable: ${tunnelError}`
+    : `Mira tunnel still starting up…`
 
 let systemMessage: string
 try {
   const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT })
   if (!canShowTunnelUrl(state)) {
     const updated = autoUpdatePlugin()
-    systemMessage = updated.ok ? AUTO_UPDATE_RELOAD_MESSAGE : TUNNEL_BLOCKED_MESSAGE
+    const notice = updated.ok ? AUTO_UPDATE_RELOAD_MESSAGE : TUNNEL_BLOCKED_MESSAGE
+    systemMessage = `${tunnelLine}\n\n${notice}`
   } else if (!channelsActive) {
     systemMessage = CHANNELS_REQUIRED_MESSAGE
   } else {
-    systemMessage = 'Mira is live — glasses connected, tunnel coming in hot 🫡'
+    systemMessage = `Mira is live — glasses connected, tunnel coming in hot 🫡\n\n${tunnelLine}`
   }
 } catch {
   systemMessage = channelsActive
-    ? 'Mira is live — glasses connected, tunnel coming in hot 🫡'
+    ? `Mira is live — glasses connected, tunnel coming in hot 🫡\n\n${tunnelLine}`
     : CHANNELS_REQUIRED_MESSAGE
 }
 
