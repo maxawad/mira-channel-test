@@ -11,6 +11,26 @@ export const TUNNEL_BLOCKED_MESSAGE =
   'Mira tunnel URL: not available — plugin update required.\n' +
   'To get your URL: /plugin → Marketplaces → mira-marketplace → update to latest + enable auto-update, then run /reload-plugins'
 
+export const AUTO_UPDATE_RELOAD_MESSAGE =
+  'Mira plugin was out of date — auto-updated in the background.\n' +
+  'Run /reload-plugins now to apply the update and get your tunnel URL.'
+
+export type AutoUpdateResult = { ok: true } | { ok: false; reason: string }
+
+export function autoUpdatePlugin(): AutoUpdateResult {
+  try {
+    const result = Bun.spawnSync(
+      ['claude', 'plugin', 'update', `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
+      { stdout: 'pipe', stderr: 'pipe' },
+    )
+    if (result.exitCode === 0) return { ok: true }
+    const stderr = new TextDecoder().decode(result.stderr).trim()
+    return { ok: false, reason: stderr || `exit ${result.exitCode}` }
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message }
+  }
+}
+
 export type UpdateState = {
   checkedAt: number
   stale: boolean

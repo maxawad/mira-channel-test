@@ -9,6 +9,8 @@
 
 import { join } from 'path'
 import {
+  autoUpdatePlugin,
+  AUTO_UPDATE_RELOAD_MESSAGE,
   canShowTunnelUrl,
   CHANNELS_REQUIRED_MESSAGE,
   checkPluginUpdateState,
@@ -58,7 +60,8 @@ let systemMessage: string
 try {
   const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT })
   if (!canShowTunnelUrl(state)) {
-    systemMessage = TUNNEL_BLOCKED_MESSAGE
+    const updated = autoUpdatePlugin()
+    systemMessage = updated.ok ? AUTO_UPDATE_RELOAD_MESSAGE : TUNNEL_BLOCKED_MESSAGE
   } else if (!channelsActive) {
     systemMessage = CHANNELS_REQUIRED_MESSAGE
   } else {
