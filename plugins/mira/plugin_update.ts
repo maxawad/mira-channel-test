@@ -4,7 +4,7 @@ import { readFileSync } from 'fs'
 const MARKETPLACE_NAME = 'mira-marketplace'
 const PLUGIN_NAME = 'mira'
 const REMOTE_PACKAGE_BASE_URL =
-  'https://raw.githubusercontent.com/maxawad/mira-channel-test/main/plugins/mira/package.json'
+  'https://api.github.com/repos/maxawad/mira-channel-test/contents/plugins/mira/package.json'
 const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 3_000
 
 export const UPDATE_NOTICE =
@@ -95,8 +95,16 @@ export async function checkPluginUpdateState({
   const res = await fetchWithTimeout(`${REMOTE_PACKAGE_BASE_URL}?t=${Date.now()}`, timeoutMs)
   if (!res.ok) throw new Error(`remote_package_http_${res.status}`)
 
-  const data = await res.json() as { version?: unknown }
-  const remoteVersion = typeof data.version === 'string' ? data.version : null
+  const data = await res.json() as { content?: string; version?: unknown }
+  let remoteVersion: string | null = null
+  if (typeof data.content === 'string') {
+    // GitHub API returns base64-encoded file content
+    const decoded = Buffer.from(data.content.replace(/\n/g, ''), 'base64').toString('utf8')
+    const pkg = JSON.parse(decoded) as { version?: unknown }
+    remoteVersion = typeof pkg.version === 'string' ? pkg.version : null
+  } else if (typeof data.version === 'string') {
+    remoteVersion = data.version
+  }
 
   const stale =
     localVersion !== null &&
