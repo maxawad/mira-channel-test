@@ -16,6 +16,7 @@ import {
 } from '../plugin_update'
 
 const URL_FILE = `${process.env.HOME}/.mira-mcp/tunnel.url`
+const ERROR_FILE = `${process.env.HOME}/.mira-mcp/tunnel.error`
 const AGENT_FILE = join(import.meta.dir, '..', 'agents', 'mira.md')
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? join(import.meta.dir, '..')
 
