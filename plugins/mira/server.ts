@@ -942,7 +942,7 @@ void openProvisionedTunnel({
   })
 
 // Periodically check for plugin updates and notify Claude in-session (once per stale version).
-const UPDATE_CHECK_INTERVAL_MS = 10_000 // every 10 seconds
+const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000 // every 5 minutes
 let lastNotifiedVersion: string | null = null
 setInterval(async () => {
   try {

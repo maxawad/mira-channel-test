@@ -4,7 +4,7 @@ import { readFileSync } from 'fs'
 const MARKETPLACE_NAME = 'mira-marketplace'
 const PLUGIN_NAME = 'mira'
 const REMOTE_PACKAGE_BASE_URL =
-  'https://api.github.com/repos/maxawad/mira-channel-test/contents/plugins/mira/package.json'
+  'https://api.github.com/repos/big-halo/mira-claude-channel/contents/plugins/mira/package.json'
 const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 3_000
 
 export const UPDATE_NOTICE =
