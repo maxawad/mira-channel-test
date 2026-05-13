@@ -1,7 +1,7 @@
 const MARKETPLACE_NAME = 'mira-marketplace'
 const PLUGIN_NAME = 'mira'
 const UPSTREAM_COMPARE_URL =
-  'https://api.github.com/repos/maxawad/mira-channel-test/compare'
+  'https://api.github.com/repos/big-halo/mira-claude-channel/compare'
 const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 1_000
 
 export const UPDATE_NOTICE =
