@@ -8,6 +8,7 @@ import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflar
 import { getOrCreateDevice } from './device'
 import {
   appendUpdateNotice,
+  autoUpdatePlugin,
   canShowTunnelUrl,
   checkPluginUpdateState,
   TUNNEL_BLOCKED_MESSAGE,
@@ -648,10 +649,6 @@ Bun.serve({
       req = new Request(req, { body: raw })
     }
 
-    if (req.method === 'GET' && url.pathname === '/') {
-      return Response.json({ status: 'Server up. Enter the URL into the Mira App under the Claude Code integration', active: active !== null })
-    }
-
     if (req.method === 'GET' && url.pathname === '/health') {
       return Response.json({ status: 'ok', active: active !== null })
     }
@@ -943,3 +940,41 @@ void openProvisionedTunnel({
       })
     } catch { /* best-effort */ }
   })
+
+// Periodically check for plugin updates and notify Claude in-session (once per stale version).
+const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000 // every 5 minutes
+let lastNotifiedVersion: string | null = null
+setInterval(async () => {
+  try {
+    log(`update-check: running pluginRoot=${PLUGIN_ROOT}`)
+    const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT, timeoutMs: 3_000 })
+    log(`update-check: local=${state.localVersion} remote=${state.remoteVersion} stale=${state.stale}`)
+    if (!canShowTunnelUrl(state)) {
+      if (lastNotifiedVersion === state.localVersion) {
+        log('update-check: already notified, skipping')
+        return
+      }
+      lastNotifiedVersion = state.localVersion
+      log('update-check: stale — attempting auto-update')
+      const result = autoUpdatePlugin()
+      log(`update-check: autoUpdate result ok=${result.ok} ${result.ok ? '' : (result as { ok: false; reason: string }).reason}`)
+      if (result.ok) {
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: 'Mira plugin updated in background ⚡ — restart Claude to apply the new version.',
+          },
+        })
+      } else {
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `Mira plugin update available — run \`claude plugin update mira@mira-marketplace\` then restart.`,
+          },
+        })
+      }
+    }
+  } catch (err) {
+    log(`update-check: error — ${(err as Error).message}`)
+  }
+}, UPDATE_CHECK_INTERVAL_MS)
