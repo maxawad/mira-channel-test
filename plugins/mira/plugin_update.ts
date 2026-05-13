@@ -1,9 +1,10 @@
 import { join } from 'path'
+import { readFileSync } from 'fs'
 
 const MARKETPLACE_NAME = 'mira-marketplace'
 const PLUGIN_NAME = 'mira'
-const REMOTE_PACKAGE_URL =
-  'https://raw.githubusercontent.com/maxawad/mira-channel-test/main/plugins/mira/package.json?no-cache'
+const REMOTE_PACKAGE_BASE_URL =
+  'https://raw.githubusercontent.com/maxawad/mira-channel-test/main/plugins/mira/package.json'
 const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 3_000
 
 export const UPDATE_NOTICE =
@@ -61,7 +62,7 @@ function localPluginVersion(pluginRoot: string): string | null {
   ]
   for (const p of candidates) {
     try {
-      const pkg = JSON.parse(Bun.file(p).textSync())
+      const pkg = JSON.parse(readFileSync(p, 'utf8'))
       if (typeof pkg.version === 'string') return pkg.version
     } catch { /* try next */ }
   }
@@ -87,7 +88,7 @@ export async function checkPluginUpdateState({
 }): Promise<UpdateState> {
   const localVersion = localPluginVersion(pluginRoot)
 
-  const res = await fetchWithTimeout(REMOTE_PACKAGE_URL, timeoutMs)
+  const res = await fetchWithTimeout(`${REMOTE_PACKAGE_BASE_URL}?t=${Date.now()}`, timeoutMs)
   if (!res.ok) throw new Error(`remote_package_http_${res.status}`)
 
   const data = await res.json() as { version?: unknown }
