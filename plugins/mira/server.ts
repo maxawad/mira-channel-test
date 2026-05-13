@@ -8,6 +8,7 @@ import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflar
 import { getOrCreateDevice } from './device'
 import {
   appendUpdateNotice,
+  autoUpdatePlugin,
   canShowTunnelUrl,
   checkPluginUpdateState,
   TUNNEL_BLOCKED_MESSAGE,
@@ -939,3 +940,32 @@ void openProvisionedTunnel({
       })
     } catch { /* best-effort */ }
   })
+
+// Periodically check for plugin updates and notify Claude in-session.
+const UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 1000 // every 2 minutes
+setInterval(async () => {
+  try {
+    const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT, timeoutMs: 3_000 })
+    if (!canShowTunnelUrl(state)) {
+      log('plugin is stale, attempting background auto-update')
+      const result = autoUpdatePlugin()
+      if (result.ok) {
+        log('plugin auto-updated, notifying Claude')
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: 'Mira plugin updated in background ⚡ — restart Claude to apply the new version.',
+          },
+        })
+      } else {
+        log(`plugin auto-update failed: ${result.reason}`)
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `Mira plugin update available — run \`claude plugin update mira@mira-marketplace\` then restart.`,
+          },
+        })
+      }
+    }
+  } catch { /* silent — never crash the server over an update check */ }
+}, UPDATE_CHECK_INTERVAL_MS)
