@@ -946,14 +946,19 @@ const UPDATE_CHECK_INTERVAL_MS = 10_000 // every 10 seconds
 let lastNotifiedVersion: string | null = null
 setInterval(async () => {
   try {
+    log('update-check: running')
     const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT, timeoutMs: 3_000 })
+    log(`update-check: local=${state.localVersion} remote=${state.remoteVersion} stale=${state.stale}`)
     if (!canShowTunnelUrl(state)) {
-      if (lastNotifiedVersion === state.localVersion) return // already notified for this version
+      if (lastNotifiedVersion === state.localVersion) {
+        log('update-check: already notified, skipping')
+        return
+      }
       lastNotifiedVersion = state.localVersion
-      log('plugin is stale, attempting background auto-update')
+      log('update-check: stale — attempting auto-update')
       const result = autoUpdatePlugin()
+      log(`update-check: autoUpdate result ok=${result.ok} ${result.ok ? '' : (result as { ok: false; reason: string }).reason}`)
       if (result.ok) {
-        log('plugin auto-updated, notifying Claude')
         await mcp.notification({
           method: 'notifications/claude/channel',
           params: {
@@ -961,7 +966,6 @@ setInterval(async () => {
           },
         })
       } else {
-        log(`plugin auto-update failed: ${result.reason}`)
         await mcp.notification({
           method: 'notifications/claude/channel',
           params: {
@@ -970,5 +974,7 @@ setInterval(async () => {
         })
       }
     }
-  } catch { /* silent — never crash the server over an update check */ }
+  } catch (err) {
+    log(`update-check: error — ${(err as Error).message}`)
+  }
 }, UPDATE_CHECK_INTERVAL_MS)
