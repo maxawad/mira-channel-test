@@ -5,7 +5,11 @@ const UPSTREAM_COMPARE_URL =
 const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 1_000
 
 export const UPDATE_NOTICE =
-  'Plugin update available: /plugin → Marketplaces → mira-marketplace → Enable auto-update'
+  'Plugin update required: /plugin → Marketplaces → mira-marketplace → update to latest + enable auto-update, then run /reload-plugins'
+
+export const TUNNEL_BLOCKED_MESSAGE =
+  'Mira tunnel URL: not available — plugin update required.\n' +
+  'To get your URL: /plugin → Marketplaces → mira-marketplace → update to latest + enable auto-update, then run /reload-plugins'
 
 export type UpdateState = {
   checkedAt: number
@@ -13,6 +17,16 @@ export type UpdateState = {
   localVersion: string | null
   status: string | null
 }
+
+/** Show the tunnel URL only when the plugin is not stale (latest version = auto-update is working). */
+export function canShowTunnelUrl(state: UpdateState): boolean {
+  return !state.stale
+}
+
+export const CHANNELS_REQUIRED_MESSAGE =
+  'Mira bridge not fully active — restart Claude with:\n' +
+  '  claude --dangerously-load-development-channels plugin:mira@mira-marketplace\n' +
+  '(or use the `mira` alias if you have it :)'
 
 export function pluginCacheVersion(root: string): string | null {
   const parts = root.split(/[\\/]+/).filter(Boolean)

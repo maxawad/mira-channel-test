@@ -8,7 +8,9 @@ import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflar
 import { getOrCreateDevice } from './device'
 import {
   appendUpdateNotice,
+  canShowTunnelUrl,
   checkPluginUpdateState,
+  TUNNEL_BLOCKED_MESSAGE,
   type UpdateState,
 } from './plugin_update'
 import { join } from 'path'
@@ -508,6 +510,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   if (req.params.name === 'help') {
+    const state = await currentUpdateState()
+    if (!canShowTunnelUrl(state)) {
+      return {
+        content: [{ type: 'text', text: TUNNEL_BLOCKED_MESSAGE }],
+      }
+    }
+
     const tunnelUrl = getTunnelUrl()
     const tunnelError = getTunnelError()
     let statusLine: string
@@ -892,4 +901,41 @@ void openProvisionedTunnel({
   deviceLabel: device.device_label,
   backendBaseUrl: TUNNEL_BACKEND_URL,
   log,
-}).catch((err) => log(`tunnel open failed: ${(err as Error).stack ?? (err as Error).message}`))
+})
+  .then(async () => {
+    const url = getTunnelUrl()
+    const err = getTunnelError()
+    if (url) {
+      const state = await currentUpdateState().catch(() => updateState)
+      if (canShowTunnelUrl(state)) {
+        try {
+          await mcp.notification({
+            method: 'notifications/claude/channel',
+            params: {
+              content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}`,
+            },
+          })
+          log(`tunnel URL pushed via channel url=${url}`)
+        } catch (notifyErr) {
+          log(`tunnel channel notify failed: ${(notifyErr as Error).message}`)
+        }
+      }
+    } else if (err) {
+      try {
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: { content: `Mira tunnel unavailable: ${err}` },
+        })
+      } catch { /* best-effort */ }
+    }
+  })
+  .catch(async (err) => {
+    const msg = (err as Error).message
+    log(`tunnel open failed: ${msg}`)
+    try {
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: { content: `Mira tunnel failed to start: ${msg}` },
+      })
+    } catch { /* best-effort */ }
+  })
