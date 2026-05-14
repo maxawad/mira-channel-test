@@ -6,7 +6,7 @@
       "command": "sh",
       "args": [
         "-lc",
-        "exec bun \"${CLAUDE_PLUGIN_ROOT}/server.ts\" 2>>/tmp/mira.log"
+        "cd \"${CLAUDE_PLUGIN_ROOT}\" && { [ -d node_modules ] || bun install --silent >>/tmp/mira.log 2>&1; }; exec bun \"${CLAUDE_PLUGIN_ROOT}/server.ts\" 2>>/tmp/mira.log"
       ]
     }
   }
