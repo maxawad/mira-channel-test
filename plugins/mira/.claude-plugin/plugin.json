@@ -1,10 +1,1 @@
-{
-  "name": "mira",
-  "description": "Bridges chat from the Mira iOS app into Claude Code",
-  "mcpServers": {
-    "mira": {
-      "command": "bun",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/server.ts"]
-    }
-  }
-}
+{"name":"mira","description":"Bridges chat from the Mira iOS app into Claude Code","mcpServers":{"mira":{"command":"bun","args":["${CLAUDE_PLUGIN_ROOT}/server.ts"]}}}

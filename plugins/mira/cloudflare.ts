@@ -1,10 +1,7 @@
-import { mkdirSync, writeFileSync, unlinkSync } from 'fs'
 
-const CLOUDFLARED_DIR = `${process.env.HOME}/.mira-mcp`
-const CLOUDFLARED_PATH = `${CLOUDFLARED_DIR}/cloudflared`
-// Persisted on disk so the SessionStart hook can read the current tunnel URL
-// without talking to the MCP server.
-const TUNNEL_URL_FILE = `${CLOUDFLARED_DIR}/tunnel.url`
+const CLOUDFLARED_MISSING_MESSAGE =
+  'cloudflared not found on PATH. Install it with `brew install cloudflared` (macOS) ' +
+  'or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/, then reconnect.'
 
 let tunnelUrl: string | null = null
 let tunnelError: string | null = null
@@ -12,41 +9,21 @@ let tunnelError: string | null = null
 export const getTunnelUrl = () => tunnelUrl
 export const getTunnelError = () => tunnelError
 
-function clearTunnelUrlFile(log: (msg: string) => void) {
-  try {
-    unlinkSync(TUNNEL_URL_FILE)
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code && code !== 'ENOENT') {
-      log(`tunnel.url unlink failed: ${(err as Error).message}`)
-    }
-  }
-}
+function findCloudflared(): string | null {
+  // Prefer a vendored copy at ~/.mira-mcp/cloudflared(.exe) — useful on Windows
+  // where users typically don't have cloudflared on PATH.
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '.'
+  const vendored =
+    process.platform === 'win32'
+      ? `${home}\\.mira-mcp\\cloudflared.exe`
+      : `${home}/.mira-mcp/cloudflared`
+  if (Bun.spawnSync([vendored, '--version']).exitCode === 0) return vendored
 
-function writeTunnelUrlFile(url: string, log: (msg: string) => void) {
-  try {
-    mkdirSync(CLOUDFLARED_DIR, { recursive: true })
-    writeFileSync(TUNNEL_URL_FILE, url)
-  } catch (err) {
-    log(`tunnel.url write failed: ${(err as Error).message}`)
-  }
-}
-
-async function ensureCloudflared(log: (msg: string) => void): Promise<string> {
-  if (await Bun.file(CLOUDFLARED_PATH).exists()) return CLOUDFLARED_PATH
-  log('downloading cloudflared (first run)...')
-  const arch = process.arch === 'arm64' ? 'arm64' : 'amd64'
-  const os = process.platform === 'darwin' ? 'darwin' : 'linux'
-  const ext = os === 'darwin' ? '.tgz' : ''
-  const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${os}-${arch}${ext}`
-  await Bun.spawn(['mkdir', '-p', CLOUDFLARED_DIR]).exited
-  if (os === 'darwin') {
-    await Bun.spawn(['sh', '-c', `curl -sL ${url} | tar xz -C ${CLOUDFLARED_DIR}`]).exited
-  } else {
-    await Bun.spawn(['sh', '-c', `curl -sL ${url} -o ${CLOUDFLARED_PATH} && chmod +x ${CLOUDFLARED_PATH}`]).exited
-  }
-  log('cloudflared downloaded')
-  return CLOUDFLARED_PATH
+  const lookup = process.platform === 'win32' ? 'where' : 'which'
+  const result = Bun.spawnSync([lookup, 'cloudflared'])
+  if (result.exitCode !== 0) return null
+  const path = new TextDecoder().decode(result.stdout).trim().split(/\r?\n/)[0]
+  return path || null
 }
 
 type ProvisionResponse = { hostname: string; token: string }
@@ -86,8 +63,6 @@ async function fetchProvisionedTunnel(opts: ProvisionOptions): Promise<Provision
 }
 
 export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<void> {
-  clearTunnelUrlFile(opts.log)
-
   const provisioned = await fetchProvisionedTunnel(opts)
   if (provisioned) {
     opts.log(`tunnel provisioned hostname=${provisioned.hostname}`)
@@ -98,13 +73,17 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
     return
   }
 
-  const binary = await ensureCloudflared(opts.log)
-  const url = `https://${provisioned.hostname}`
-  tunnelUrl = url
+  const binary = findCloudflared()
+  if (!binary) {
+    opts.log('cloudflared not found on PATH')
+    tunnelError = CLOUDFLARED_MISSING_MESSAGE
+    return
+  }
+  opts.log(`cloudflared found at ${binary}`)
+  tunnelUrl = `https://${provisioned.hostname}`
   tunnelError = null
-  writeTunnelUrlFile(url, opts.log)
 
-  opts.log(`tunnel opening (provisioned) hostname=${provisioned.hostname}`)
+  opts.log(`tunnel opening (provisioned) url=${tunnelUrl} hostname=${provisioned.hostname}`)
   const proc = Bun.spawn(
     [binary, 'tunnel', 'run', '--token', provisioned.token],
     {
@@ -114,7 +93,6 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
         opts.log(`cloudflared exited code=${code}`)
         tunnelUrl = null
         tunnelError = 'Tunnel closed. Restart the plugin to reconnect.'
-        clearTunnelUrlFile(opts.log)
       },
     },
   )
