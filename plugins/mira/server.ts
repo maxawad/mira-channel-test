@@ -20,9 +20,11 @@ import { homedir } from 'os'
 const PORT = Number(process.env.MIRA_PORT ?? 3141)
 const REQUEST_TIMEOUT_MS = 120_000
 // Periodic SSE comment to keep idle connections alive when no
-// status_update / tool_status events are firing.
-const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 15_000)
-const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
+// status_update / tool_status events are firing. Also acts as the liveness
+// signal the iOS stall watchdog uses to detect silent socket deaths — must
+// stay well under the iOS watchdog threshold (currently 6s).
+const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 2_000)
+const TUNNEL_BACKEND_URL = 'http://localhost:8000'
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
 const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
@@ -451,7 +453,6 @@ const mcp = new Server(
 )
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => {
-  log('mcp list_tools')
   return {
     tools: [
       {
@@ -482,8 +483,6 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
 })
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-  log(`mcp call_tool name=${req.params.name}`, req.params.arguments)
-
   if (req.params.name === 'status_update') {
     const args = (req.params.arguments ?? {}) as { text?: unknown }
     const text = typeof args.text === 'string' ? args.text.trim() : ''
@@ -502,7 +501,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     resetTimeout()
     const displayText = text.endsWith('...') ? text : `${text}...`
     broadcast(p, { status_update: { text: displayText } })
-    log(`status_update OK text=${JSON.stringify(text.slice(0, 120))}`)
     return {
       content: [
         { type: 'text', text: 'Status delivered to Mira. Continue working on the final answer.' },
@@ -640,14 +638,6 @@ Bun.serve({
   idleTimeout: 0,
   async fetch(req) {
     const url = new URL(req.url)
-    const ua = req.headers.get('user-agent') ?? ''
-    log(`http ${req.method} ${url.pathname} ua=${ua.slice(0, 60)}`)
-
-    if (req.method === 'POST') {
-      const raw = await req.text()
-      log(`RAW BODY ${url.pathname}: ${raw}`)
-      req = new Request(req, { body: raw })
-    }
 
     if (req.method === 'GET' && url.pathname === '/health') {
       return Response.json({ status: 'ok', active: active !== null })
@@ -771,7 +761,6 @@ Bun.serve({
         include_in_tools_used: true,
       }
       broadcast(p, { tool_status: payload })
-      log(`tool_status ${state} tool=${toolName} call_id=${toolUseId ?? '(none)'} display=${JSON.stringify(display)}`)
       return Response.json({ status: 'delivered' })
     }
 
@@ -865,14 +854,11 @@ Bun.serve({
 
       const { entry, response } = openPendingChat()
       try {
-        const channelParams = { content: userText, meta };
-        log('mcp notify: sending params:', channelParams);
+        log(`chat IN session_id=${entry.sessionId} chars=${userText.length}`)
         await mcp.notification({
           method: 'notifications/claude/channel',
-          params: channelParams,
-        });
-        log('mcp notify ✓');
-   
+          params: { content: userText, meta },
+        })
 
         return new Response(responseToSse(entry, response), {
           headers: { 'Content-Type': 'text/event-stream' },
