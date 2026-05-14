@@ -913,7 +913,7 @@ void openProvisionedTunnel({
           await mcp.notification({
             method: 'notifications/claude/channel',
             params: {
-              content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}`,
+              content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}\n\nAfter echoing the tunnel URL above exactly as instructed, introduce yourself and briefly describe what you can do for the user (including access to past Mira conversations capabilities).`,
             },
           })
           log(`tunnel URL pushed via channel url=${url}`)
