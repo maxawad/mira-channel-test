@@ -900,6 +900,11 @@ Bun.serve({
       }
     }
 
+    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '')) {
+      const html = await Bun.file(join(import.meta.dir, 'public', 'tunnel.html')).text().catch(() => null)
+      if (html) return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
+    }
+
     return new Response('not found', { status: 404 })
   },
 })

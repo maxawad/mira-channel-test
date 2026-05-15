@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mira — Connect your phone</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #090909;
+      --surface: #131313;
+      --border: #222222;
+      --text: #ffffff;
+      --muted: #777;
+      --green: #00dc82;
+      --cta: #ff4d1c;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 40px;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: rgba(8,8,8,0.9);
+      backdrop-filter: blur(12px);
+      z-index: 100;
+    }
+    .logo {
+      display: flex;
+      align-items: center;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .nav-links { display: flex; gap: 28px; }
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      transition: color 0.15s;
+    }
+    .nav-links a:hover { color: var(--text); }
+
+    main {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 60px 24px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 52px 48px;
+      max-width: 560px;
+      width: 100%;
+      text-align: center;
+    }
+
+    .status-dot {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--green);
+      margin-bottom: 32px;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      background: var(--green);
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    h1 {
+      font-size: clamp(26px, 4vw, 36px);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.2;
+      margin-bottom: 12px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 15px;
+      margin-bottom: 40px;
+    }
+
+    .url-box {
+      background: #0e0e0e;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+      text-align: left;
+    }
+    .url-text {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 14px;
+      color: var(--text);
+      word-break: break-all;
+      flex: 1;
+    }
+    .copy-btn {
+      background: var(--text);
+      color: #000;
+      border: none;
+      border-radius: 7px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: opacity 0.15s;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { opacity: 0.85; }
+    .copy-btn.copied {
+      background: var(--green);
+      color: #000;
+    }
+
+    .hint {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 40px;
+    }
+    .hint strong { color: var(--text); }
+
+    .steps {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      text-align: left;
+      border-top: 1px solid var(--border);
+      padding-top: 32px;
+    }
+    .step {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+    }
+    .step-num {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: #1e1e1e;
+      border: 1px solid var(--border);
+      font-size: 12px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      color: var(--muted);
+      margin-top: 1px;
+    }
+    .step-text {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .step-text strong { color: var(--text); }
+
+    footer {
+      text-align: center;
+      padding: 24px;
+      font-size: 12px;
+      color: #444;
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <a class="logo" href="https://trymira.com">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 24" fill="none" style="height:20px;width:auto;color:#ffffff;">
+      <path d="M37.7379 17C37.7379 17.9205 38.479 18.6667 39.3931 18.6667H46.3448C47.259 18.6667 48 19.4129 48 20.3333V22.3333C48 23.2538 47.259 24 46.3448 24H32.3331C30.2181 24 28.3352 22.6509 27.6419 20.6389L23.4717 8.5354C23.2926 8.01535 22.8059 7.66667 22.2592 7.66667C21.3965 7.66667 20.7795 8.50662 21.032 9.33727L24.8347 21.8455C25.1603 22.9167 24.3646 24 23.252 24H16.0778C15.3711 24 14.7423 23.5481 14.5125 22.8751L11.5457 14.1843C11.3719 13.6752 10.8962 13.3333 10.3615 13.3333C9.50185 13.3333 8.89783 14.1856 9.17728 15.0041L11.4944 21.7915C11.8637 22.8735 11.0653 24 9.92908 24H1.65517C0.741046 24 0 23.2538 0 22.3333V7.33333C0 3.28325 3.2606 0 7.28276 0H33.1035C35.663 0 37.7379 2.08934 37.7379 4.66667V17Z" fill="currentColor"/>
+    </svg>
+  </a>
+  <div class="nav-links">
+    <a href="https://trymira.com">Home</a>
+    <a href="https://trymira.com/pages/setup" style="color:#fff;font-weight:600;">Get the app</a>
+  </div>
+</nav>
+
+<main>
+  <div class="card">
+    <div class="status-dot">
+      <span class="dot"></span>
+      Tunnel active
+    </div>
+
+    <h1>Your Claude bridge is ready</h1>
+    <p class="subtitle">Copy this URL and paste it in the Mira app to connect your glasses.</p>
+
+    <div class="url-box">
+      <span class="url-text" id="url-display">—</span>
+      <button class="copy-btn" id="copy-btn" onclick="copyUrl()">Copy</button>
+    </div>
+    <p class="hint"><strong>Mira app</strong> → Settings → Integrations → Claude Code → paste URL</p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-text">Open the <strong>Mira app</strong> on your phone and go to <strong>Settings</strong></div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-text">Tap <strong>Integrations → Claude Code</strong></div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-text">Paste the URL above and toggle <strong>Claude Code</strong> on</div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-text">Say something — your glasses are now talking to Claude</div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>Mira · Claude Code bridge · <a href="https://trymira.com" style="color:inherit;">trymira.com</a></footer>
+
+<script>
+  // Auto-detect the current URL (this page is served at the tunnel URL)
+  const tunnelUrl = window.location.origin;
+  document.getElementById('url-display').textContent = tunnelUrl;
+
+  function copyUrl() {
+    navigator.clipboard.writeText(tunnelUrl).then(() => {
+      const btn = document.getElementById('copy-btn');
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = 'Copy';
+        btn.classList.remove('copied');
+      }, 2000);
+    });
+  }
+</script>
+</body>
+</html>
