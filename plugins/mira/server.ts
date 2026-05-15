@@ -723,9 +723,9 @@ Bun.serve({
         log(`conversation sync failed: ${(err as Error).stack ?? (err as Error).message}`)
       })
 
-      events.setConnection({ userId, accessToken })
-      log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
       emit('connect', { user_id: userId })
+      log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
+      events.setConnection({ userId, accessToken })
       return Response.json({
         status: 'connected',
         user_id: userId,

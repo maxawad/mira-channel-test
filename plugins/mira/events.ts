@@ -15,6 +15,7 @@ export class PluginEventShipper {
 
   emit(kind: string, payload: Record<string, unknown> = {}, level: EventLevel = 'info'): void {
     this.buffer.push({ ts: new Date().toISOString(), kind, level, plugin_pid: process.pid, payload })
+    if (this.connection) void this.flush()
   }
 
   async flush(): Promise<void> {
