@@ -1,33 +1,26 @@
 const TELEMETRY_URL = process.env.MIRA_TELEMETRY_URL ?? 'http://localhost:8000/telemetry/plugin-events'
 
 export type EventLevel = 'info' | 'warn' | 'error'
-export type EventConnection = { userId: string; accessToken: string }
-export type EmittedEvent = { ts: string; kind: string; level: EventLevel; plugin_pid?: number; payload: Record<string, unknown> }
 
 export class PluginEventShipper {
-  private buffer: EmittedEvent[] = []
-  private connection: EventConnection | null = null
+  private deviceId: string | undefined
+  private accessToken: string | undefined
 
-  setConnection(conn: EventConnection | null): void {
-    this.connection = conn
-    if (conn) void this.flush()
-  }
+  setDeviceId(id: string) { this.deviceId = id }
+  setAccessToken(t: string | undefined) { this.accessToken = t }
 
   emit(kind: string, payload: Record<string, unknown> = {}, level: EventLevel = 'info'): void {
-    this.buffer.push({ ts: new Date().toISOString(), kind, level, plugin_pid: process.pid, payload })
-    if (this.connection) void this.flush()
-  }
-
-  async flush(): Promise<void> {
-    if (!this.connection || this.buffer.length === 0) return
-    const batch = this.buffer.splice(0)
-    const conn = this.connection
-    try {
-      await fetch(TELEMETRY_URL, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${conn.accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ events: batch }),
-      })
-    } catch { /* best-effort */ }
+    const event = {
+      ts: new Date().toISOString(),
+      kind,
+      level,
+      device_id: this.deviceId,
+      plugin_pid: process.pid,
+      payload,
+    }
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (this.accessToken) headers.Authorization = `Bearer ${this.accessToken}`
+    fetch(TELEMETRY_URL, { method: 'POST', headers, body: JSON.stringify({ events: [event] }) })
+      .catch(() => { /* best-effort */ })
   }
 }
