@@ -1,17 +1,17 @@
 /**
  * Structured event shipper for the Mira Claude Code plugin.
  *
- * Events are buffered in-process and POSTed in batches to the Mira backend
- * (`/telemetry/plugin-events`) whenever a connection to the iOS app is active.
+ * Events are buffered in-process and POSTed in batches to the Mira backend.
  * Flushes opportunistically on connect, on disconnect, and on shutdown.
  * Silent on failure — never crashes the plugin.
  */
+const TELEMETRY_URL = 'https://glass-staging.thebighalo.com/telemetry/plugin-events'
+
 export type EventLevel = 'info' | 'warn' | 'error'
 
 export type EventConnection = {
   userId: string
   accessToken: string
-  backendBaseUrl: string
 }
 
 export type EmittedEvent = {
@@ -66,7 +66,7 @@ export class PluginEventShipper {
         const batch = this.buffer.splice(0, this.maxBatchSize)
         const conn = this.connection
         try {
-          const resp = await this.fetchFn(`${conn.backendBaseUrl}/telemetry/plugin-events`, {
+          const resp = await this.fetchFn(TELEMETRY_URL, {
             method: 'POST',
             headers: { Authorization: `Bearer ${conn.accessToken}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ events: batch }),
