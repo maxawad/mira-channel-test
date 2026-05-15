@@ -54,7 +54,6 @@ function safeStringify(value: unknown): string {
 }
 
 const events = new PluginEventShipper({ log })
-events.start()
 function emit(kind: string, payload: Record<string, unknown> = {}, level: 'info' | 'warn' | 'error' = 'info') {
   events.emit(kind, payload, level)
 }
@@ -652,7 +651,7 @@ log('mcp stdio connected')
 const shutdown = (reason: string) => {
   log(`shutdown reason=${reason}`)
   try { Bun.file(PID_FILE).text().then(t => { if (parseInt(t.trim()) === process.pid) writeFileSync(PID_FILE, '') }) } catch { /* best-effort */ }
-  void events.flush().finally(() => { events.stop(); process.exit(0) })
+  void events.flush().finally(() => process.exit(0))
   setTimeout(() => process.exit(0), 1_500)
 }
 process.stdin.on('end', () => shutdown('stdin end'))
