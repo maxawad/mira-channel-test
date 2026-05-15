@@ -1,4 +1,4 @@
-const TELEMETRY_URL = 'https://glass-staging.thebighalo.com/telemetry/plugin-events'
+const TELEMETRY_URL = process.env.MIRA_TELEMETRY_URL ?? 'https://glass-staging.thebighalo.com/telemetry/plugin-events'
 
 export type EventLevel = 'info' | 'warn' | 'error'
 export type EventConnection = { userId: string; accessToken: string }
