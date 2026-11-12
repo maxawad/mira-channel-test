@@ -1,10 +1,38 @@
-# Mira — Claude Code channel
+# Mira Claude Code Channel
 
-A Claude Code channel plugin that bridges chat from the Mira iOS app into a local Claude Code session.
+Mira Claude Code Channel is a plugin that lets you talk to a Claude Code session on your own computer from the Mira iOS app (the companion app for Mira glasses). You type or speak in the app, the message shows up in Claude Code, and Claude's answer is sent back to your phone.
 
-When the iOS app's "Claude Code" toggle is ON, every message the user sends from the app POSTs to `http://127.0.0.1:3141/api/chat` on your laptop. This plugin runs as an MCP channel inside Claude Code, receives the POST, pushes the message into the active Claude Code session as a `<channel source="mira" chat_id="...">` tag, and waits. When Claude finishes responding, the plugin's `Stop` hook forwards `last_assistant_message` back to the waiting iOS request.
+## What it does
 
-## Install
+- Runs as a Claude Code "channel" plugin (an MCP server) and listens for chat requests on port 3141.
+- Pushes each incoming app message into the active Claude Code session as a `<channel source="mira">` message.
+- Uses Claude Code hooks (`Stop`, `PreToolUse`, `PostToolUse`, `SessionStart`) to stream status, tool activity, permission prompts and the final answer back to the app as server-sent events.
+- Can open a Cloudflare tunnel so the phone can reach your computer when it is not on the same network.
+- Checks for plugin updates and sends basic plugin telemetry events.
+
+## Tech stack
+
+- TypeScript, run with [Bun](https://bun.sh)
+- `@modelcontextprotocol/sdk` and `zod`
+- Claude Code plugin and marketplace format, with `cloudflared` for the optional tunnel
+
+## Status
+
+Prototype and test repository. It works as a development-stage plugin, but it needs three things outside this repo: Claude Code, the Mira iOS app, and the Mira backend (the tunnel setup and telemetry call the Mira staging backend). It cannot be tried as a static web page. The repository also includes copies of the Claude Code documentation (`channels.md`, `hooksinfo.md`, `plugininfo.md`) that the plugin was built against. That documentation belongs to Anthropic.
+
+## Configuration
+
+All settings are optional environment variables. See `.env.example`.
+
+- `MIRA_TELEMETRY_URL`: where plugin events are posted. Defaults to `http://localhost:8000/telemetry/plugin-events`.
+- `MIRA_HOME`: folder for plugin state. Defaults to `~/.mira-mcp`.
+- `MIRA_SSE_HEARTBEAT_MS`: keep-alive interval for streaming responses. Defaults to 2000.
+
+The plugin listens on all network interfaces on port 3141, so only run it on networks you trust.
+
+## Install and run
+
+Requirements: Claude Code, Bun, and optionally `cloudflared` (`brew install cloudflared` on macOS).
 
 This is a development-stage channel, so it isn't on Anthropic's approved allowlist. You'll start Claude Code with `--dangerously-load-development-channels` to load it.
 
@@ -63,3 +91,7 @@ plugins/mira/
   server.ts                              # MCP channel + Bun HTTP listener
   package.json                           # @modelcontextprotocol/sdk
 ```
+
+## Credits
+
+Built by Max Awad and the Mira team. The Claude Code plugin and channel format is by Anthropic.
